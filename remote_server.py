@@ -71,6 +71,7 @@ class RemoteServer:
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.gaze_estimator.camera.width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.gaze_estimator.camera.height)
         
+        print("Server started ")
         
         try:
             while True:
