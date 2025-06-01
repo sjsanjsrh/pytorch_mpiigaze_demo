@@ -12,6 +12,8 @@ import threading
 
 HOST, PORT = "0.0.0.0", 25500
 
+DEBUG = True
+
 def _get_ddbox_size(face: Face) -> float:
     """
     Calculate the size of the bounding box for the face.
@@ -95,6 +97,17 @@ class RemoteServer:
                 
                 if face is None:
                     continue
+
+                
+                if DEBUG:
+                    cv2.rectangle(
+                        undistorted, 
+                        tuple(face.bbox[0].astype(int)), 
+                        tuple(face.bbox[1].astype(int)), 
+                        (0, 255, 0), 2)
+                    flip = cv2.flip(undistorted, 1)
+                    cv2.imshow("Remote Server", flip)
+                    cv2.waitKey(1)
 
                 self.gaze_estimator.estimate_gaze(undistorted, face)
 

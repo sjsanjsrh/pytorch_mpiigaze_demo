@@ -8,13 +8,15 @@ import time
 import math
 
 class Calibration:
-    def __init__(self, gaze_estimator: GazeEstimator, screen_width, screen_height):
+    def __init__(self, gaze_estimator: GazeEstimator, screen_width, screen_height, 
+                 process_noise=1e-9):
+        
         self.gaze_estimator = gaze_estimator 
 
         self.screen_width = screen_width
         self.screen_height = screen_height
 
-        self.filter = KalmanFilter2D(process_noise=1e-9)
+        self.filter = KalmanFilter2D(process_noise=process_noise)
         self.last_time = 0
 
         self.trs_matrix = None

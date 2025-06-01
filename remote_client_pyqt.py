@@ -1,16 +1,24 @@
 import sys
 import socket
-import struct
 import numpy as np
 import time
+import keyboard
 from PyQt5 import QtCore, QtGui, QtWidgets
 from ptgaze.point.calibration import Calibration
 from ptgaze.common.face import Face
 from ptgaze.common.face_parts import FacePartsName
+import ctypes
 
 # 서버 주소와 포트
 SERVER_IP = '127.0.0.1'  # 예: '192.168.0.10'
 SERVER_PORT = 25500
+
+MOUSE_HOOKING_KEY = '['  # 마우스 위치 업데이트 토글 키
+RESET_CALIBRATION_KEY = ']'  # 캘리브레이션 초기화 키
+
+
+MOUSE_SCROOL_AREA = 0.01  # 마우스 스크롤 인식영역 (0.05 = 5% 화면 높이)
+MOUSE_SCROOL_STEP = 100  # 마우스 스크롤 시 이동 거리
 
 class GazeReceiver(QtCore.QThread):
     # gaze 데이터 전달용 시그널
@@ -72,15 +80,49 @@ class Overlay(QtWidgets.QWidget):
         self.gaze = None
         self.filtered_gaze = None
         self.calibrated_points = []
+
+        self.mouseHooking = False
+
         # 캘리브레이션 객체 생성
-        self.calibration = Calibration(None, screen_width, screen_height)
+        self.calibration = Calibration(None, screen_width, screen_height, 
+                                       process_noise=1e-10)
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.update)
         self.timer.start(30)
 
+        self.last_scroll_time = 0  # 마지막 스크롤 시각
+        self.scroll_interval = 0.1  # 최소 스크롤 간격(초)
+
+        # gaze 기반 스크롤 타이머
+        self.scroll_timer = QtCore.QTimer(self)
+        self.scroll_timer.timeout.connect(self.check_and_scroll)
+        self.scroll_timer.start(50)  # 50ms마다 체크
+
     def set_gaze(self, gaze):
         self.gaze = gaze
+
+    def mouse_event(self, x, y, wheel_delta=0):
+        # Windows용 마우스 휠 이벤트 발생
+        MOUSEEVENTF_WHEEL = 0x0800
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_WHEEL, int(x), int(y), int(wheel_delta), 0)
+
+    def check_and_scroll(self):
+        # gaze 위치에 따라 마우스 휠 이벤트 발생 (paintEvent에서 분리)
+        if not self.mouseHooking or self.filtered_gaze is None:
+            return
+        x, y = self.filtered_gaze
+        scrollyu = int(self.screen_height * MOUSE_SCROOL_AREA)
+        scrollyd = int(self.screen_height * (1 - MOUSE_SCROOL_AREA))
+        now = time.time()
+        if now - self.last_scroll_time < self.scroll_interval:
+            return  # 너무 자주 스크롤 방지
+        if y < scrollyu:
+            self.mouse_event(x, y, MOUSE_SCROOL_STEP)
+            self.last_scroll_time = now
+        elif y > scrollyd:
+            self.mouse_event(x, y, -MOUSE_SCROOL_STEP)
+            self.last_scroll_time = now
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
@@ -94,7 +136,7 @@ class Overlay(QtWidgets.QWidget):
             # 캘리브레이션 완료 후 gaze 표시
             painter.setPen(QtGui.QPen(QtCore.Qt.white, 2))
             painter.setFont(QtGui.QFont('Arial', 40))
-            painter.drawText(self.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter, "시선 추적 중 (ESC로 종료)")
+            painter.drawText(self.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter, "시선 추적 중...")
             if self.gaze is not None:
                 try:
                     # gaze 데이터로 Face 객체 생성 및 gaze 벡터 할당
@@ -104,14 +146,28 @@ class Overlay(QtWidgets.QWidget):
                         eye.normalized_gaze_vector = np.array(self.gaze[i], dtype=np.float32)
                     # gaze 2D 좌표 변환 및 필터링, 변환
                     centerd_point = self.calibration.calc_eye_2d_vector(face)
-                    point = self.calibration.calc_trs_transform(centerd_point)
-                    k_point = self.calibration.calc_filtered_point(centerd_point)
-                    k_point = self.calibration.calc_trs_transform(k_point)
-                    self.filtered_gaze = 0.8 * self.filtered_gaze + 0.2 * k_point if self.filtered_gaze is not None else k_point
-                    # 파란색 원으로 gaze 위치 표시
-                    painter.setBrush(QtGui.QBrush(QtCore.Qt.blue))
-                    painter.setPen(QtGui.QPen(QtCore.Qt.blue, 2))
-                    painter.drawEllipse(int(self.filtered_gaze[0])-10, int(self.filtered_gaze[1])-10, 20, 20)
+                    point = self.calibration.calc_filtered_point(centerd_point)
+                    self.filtered_gaze = self.calibration.calc_trs_transform(point)
+                    
+                    x, y = self.filtered_gaze
+                    
+                    scrollyu = int(self.screen_height * MOUSE_SCROOL_AREA)
+                    scrollyd = int(self.screen_height * (1 - MOUSE_SCROOL_AREA))
+
+                    if self.mouseHooking:
+                        # # 마우스 위치 업데이트
+                        QtGui.QCursor.setPos(x, y)
+                    else:
+                        # 파란색 원으로 gaze 위치 표시
+                        painter.setBrush(QtGui.QBrush(QtCore.Qt.blue))
+                        painter.setPen(QtGui.QPen(QtCore.Qt.blue, 2))
+                        painter.drawEllipse(x-10, y-10, 20, 20)
+
+                    # 마우스 스크롤 영역 표시
+                    painter.setPen(QtGui.QPen(QtCore.Qt.red, 2))
+                    painter.drawLine(0, scrollyu, self.screen_width, scrollyu)
+                    painter.drawLine(0, scrollyd, self.screen_width, scrollyd)
+
                 except Exception:
                     pass
 
@@ -130,13 +186,35 @@ class Overlay(QtWidgets.QWidget):
             # 현재 점 표시 및 gaze 수집
             current_point = self.calibration_points[self.current_calibration_index]
             dt = now - self.calibration_start_time
-            # 0.0~0.5초: 노란색 점 표시, 기록 안 함
-            if dt < 0.5:
+            # 중앙에서부터 화살표 그리기
+            painter.setPen(QtGui.QPen(QtCore.Qt.red, 4))
+            painter.setBrush(QtCore.Qt.red)
+            cx, cy = self.screen_width / 2, self.screen_height / 2
+            tx, ty = current_point
+            v = np.array([tx - cx, ty - cy])
+            v /= np.linalg.norm(v)
+            # 화살표 길이 조정
+            cv = v * 100
+            tv = v * 50
+            cx, cy = cx + cv[0], cy + cv[1]
+            tx, ty = tx - tv[0], ty - tv[1]
+            cx, cy = int(cx), int(cy)
+            tx, ty = int(tx), int(ty)
+            painter.drawLine(cx, cy, tx, ty)
+            # 삼각형 화살표 끝 부분 그리기
+            arraw_size = 20
+            painter.drawPolygon(QtGui.QPolygon([
+                QtCore.QPoint(tx + v[1]*arraw_size/2 - v[0]*arraw_size, ty - v[0]*arraw_size/2 - v[1]*arraw_size),
+                QtCore.QPoint(tx - v[1]*arraw_size/2 - v[0]*arraw_size, ty + v[0]*arraw_size/2 - v[1]*arraw_size),
+                QtCore.QPoint(tx, ty)
+            ]))
+            # 노란색 점 표시, 기록 안 함
+            if dt < 1.0:
                 painter.setPen(QtGui.QPen(QtCore.Qt.yellow, 4))
                 painter.setBrush(QtGui.QBrush(QtCore.Qt.yellow))
                 painter.drawEllipse(int(current_point[0])-20, int(current_point[1])-20, 40, 40)
-            # 0.5~1.5초: 녹색 점 표시, gaze 기록
-            elif dt < 1.5:
+            # 녹색 점 표시, gaze 기록
+            elif dt < 2.0:
                 painter.setPen(QtGui.QPen(QtCore.Qt.green, 4))
                 painter.setBrush(QtGui.QBrush(QtCore.Qt.green))
                 painter.drawEllipse(int(current_point[0])-20, int(current_point[1])-20, 40, 40)
@@ -160,9 +238,9 @@ class Overlay(QtWidgets.QWidget):
             # 안내문구
             painter.setPen(QtGui.QPen(QtCore.Qt.white, 2))
             painter.setFont(QtGui.QFont('Arial', 40))
-            painter.drawText(self.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter, f"점 {self.current_calibration_index+1} 응시")
+            painter.drawText(self.rect(), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignHCenter, f"점 {self.current_calibration_index+1} 응시")
             # 1.5초 후 다음 점
-            if dt >= 1.5:
+            if dt >= 2.0:
                 self.current_calibration_index += 1
                 self.calibration_start_time = now
                 if self.current_calibration_index >= len(self.calibration_points):
@@ -190,6 +268,11 @@ if __name__ == "__main__":
     receiver.gaze_signal.connect(overlay.set_gaze)
     receiver.start()
 
+    # 키보드 이벤트 처리
+    keyboard.add_hotkey(MOUSE_HOOKING_KEY, 
+                        lambda: setattr(overlay, 'mouseHooking', not overlay.mouseHooking))
+    keyboard.add_hotkey(RESET_CALIBRATION_KEY,
+                        lambda: setattr(overlay, 'current_calibration_index', -1))
     app.exec_()
     receiver.stop()
     receiver.wait()
