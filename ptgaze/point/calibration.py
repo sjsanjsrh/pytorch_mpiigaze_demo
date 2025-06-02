@@ -47,13 +47,13 @@ class Calibration:
 
         return res
     
-    def calc_noize(self, origin_points, collected_points):
+    def calc_noize(self, origin_points, collected_points, R = 1.0):
         points = np.empty((0, 2), dtype=np.float32)
         for i in range(len(origin_points)):
             points = np.append(points, collected_points[i] - origin_points[i])
         points = np.array(points, dtype=np.float32)
         points = points.reshape(-1, 2)
-        self.filter.calc_noize(points)
+        self.filter.calc_noize(points, R)
 
 
 

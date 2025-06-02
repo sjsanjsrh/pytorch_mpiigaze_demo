@@ -255,7 +255,8 @@ class Demo:
             self.calibration = Calibration(
                 self.gaze_estimator,
                 pyautogui.size().width,
-                pyautogui.size().height
+                pyautogui.size().height,
+                process_noise=1e-9
             )
             self.calibration_start_time = time.time()
             self.current_calibration_index = -1
@@ -289,7 +290,7 @@ class Demo:
             for e in self.collected_points:
                 points.append(self.calibration.calc_filtered_centers(e))
             self.calibration.calc_trs_matrix(calibration_points, points)
-            self.calibration.calc_noize(points, self.collected_points)
+            self.calibration.calc_noize(points, self.collected_points, 5)
 
             # 계산된 점 표시
             # 점점 연하게 하기 위해서 self.fullscimg에서 빼기

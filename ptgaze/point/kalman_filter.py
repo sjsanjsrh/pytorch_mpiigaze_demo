@@ -77,6 +77,6 @@ class KalmanFilter2D:
         self.predict(dt)
         return self.update(z)
 
-    def calc_noize(self, points):
+    def calc_noize(self, points, R = 1.0):
         variances = np.var(points, axis=0)
-        self.R = np.diag(variances)
+        self.R = np.diag(variances)*R
