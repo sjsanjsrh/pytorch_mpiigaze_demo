@@ -15,6 +15,9 @@ SERVER_PORT = 25500
 SCREEN_WIDTH = pyautogui.size().width
 SCREEN_HEIGHT = pyautogui.size().height
 
+NOISE_R = 5
+NOISE_Q = 1e-9
+
 # 캘리브레이션 점
 calibration_points = [
     np.array((SCREEN_WIDTH / 10, SCREEN_HEIGHT / 10), dtype=np.float32),
@@ -49,7 +52,7 @@ def main():
             break
         time.sleep(0.1)
 
-    calibration = Calibration(None, SCREEN_WIDTH, SCREEN_HEIGHT)
+    calibration = Calibration(None, SCREEN_WIDTH, SCREEN_HEIGHT, process_noise=NOISE_Q)
     current_calibration_index = -1
     calibration_start_time = time.time()
     collected_points = [[], [], [], []]
@@ -120,7 +123,7 @@ def main():
                     for e in collected_points:
                         points.append(calibration.calc_filtered_centers(e))
                     calibration.calc_trs_matrix(calibration_points, points)
-                    calibration.calc_noize(points, collected_points)
+                    calibration.calc_noize(points, collected_points, NOISE_R)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
 

@@ -21,6 +21,9 @@ MOUSE_SCROOL_STEP = 100  # 마우스 스크롤 시 이동 거리
 
 MOUSE_CLICK_RATIO = 0.1  # 마우스 클릭 인식 비율
 
+NOISE_R = 5
+NOISE_Q = 1e-9
+
 class GazeReceiver(QtCore.QThread):
     # gaze 데이터 전달용 시그널
     gaze_signal = QtCore.pyqtSignal(object)
@@ -91,7 +94,7 @@ class Overlay(QtWidgets.QWidget):
 
         # 캘리브레이션 객체 생성
         self.calibration = Calibration(None, screen_width, screen_height, 
-                                       process_noise=1e-10)
+                                       process_noise=NOISE_Q)
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.update)
@@ -278,7 +281,7 @@ class Overlay(QtWidgets.QWidget):
                     for e in self.collected_points:
                         points.append(self.calibration.calc_filtered_centers(e))
                     self.calibration.calc_trs_matrix(self.calibration_points, points)
-                    self.calibration.calc_noize(points, self.collected_points)
+                    self.calibration.calc_noize(points, self.collected_points, NOISE_R)
                     self.calibrated = True
 
     def keyPressEvent(self, event):
