@@ -8,6 +8,7 @@ from ptgaze.demo import Demo
 import cv2
 from ptgaze.common import Face
 import threading
+from ptgaze.point.mouth_open import mouth_open_ratio
 
 
 HOST, PORT = "0.0.0.0", 25500
@@ -114,8 +115,9 @@ class RemoteServer:
                 data = []
                 for key in self.gaze_estimator.EYE_KEYS:
                     eye = getattr(face, key.name.lower())
-                    data.append(eye.normalized_gaze_vector)
-                data = np.array(data, dtype=np.float32).flatten()
+                    data.extend(eye.normalized_gaze_vector)
+                data.append(mouth_open_ratio(face))
+                data = np.array(data, dtype=np.float32)
 
                 data = data.astype(np.float32).tobytes()
 

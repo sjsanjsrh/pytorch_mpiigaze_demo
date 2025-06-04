@@ -16,13 +16,15 @@ SERVER_PORT = 25500
 MOUSE_HOOKING_KEY = '['  # 마우스 위치 업데이트 토글 키
 RESET_CALIBRATION_KEY = ']'  # 캘리브레이션 초기화 키
 
-
 MOUSE_SCROOL_AREA = 0.01  # 마우스 스크롤 인식영역 (0.05 = 5% 화면 높이)
 MOUSE_SCROOL_STEP = 100  # 마우스 스크롤 시 이동 거리
+
+MOUSE_CLICK_RATIO = 0.1  # 마우스 클릭 인식 비율
 
 class GazeReceiver(QtCore.QThread):
     # gaze 데이터 전달용 시그널
     gaze_signal = QtCore.pyqtSignal(object)
+    mouth_open_signal = QtCore.pyqtSignal(object)
 
     def __init__(self, server_ip, server_port):
         super().__init__()
@@ -44,6 +46,9 @@ class GazeReceiver(QtCore.QThread):
                     reye = gaze[:3]
                     leye = gaze[3:6]
                     self.gaze_signal.emit((reye, leye))
+                if len(data) >= 24+4:
+                    mouth_open_ratio = np.frombuffer(data[24:], dtype=np.float32)
+                    self.mouth_open_signal.emit(mouth_open_ratio)
             except Exception:
                 pass
         sock.close()
@@ -80,6 +85,7 @@ class Overlay(QtWidgets.QWidget):
         self.gaze = None
         self.filtered_gaze = None
         self.calibrated_points = []
+        self.mouth_open_ratio = None
 
         self.mouseHooking = False
 
@@ -101,11 +107,25 @@ class Overlay(QtWidgets.QWidget):
 
     def set_gaze(self, gaze):
         self.gaze = gaze
+    
+    def set_mouth_open_ratio(self, mouth_open_ratio):
+        self.mouth_open_ratio = mouth_open_ratio
 
-    def mouse_event(self, x, y, wheel_delta=0):
+    def mouse_event_scroll(self, x, y, wheel_delta=0):
         # Windows용 마우스 휠 이벤트 발생
         MOUSEEVENTF_WHEEL = 0x0800
         ctypes.windll.user32.mouse_event(MOUSEEVENTF_WHEEL, int(x), int(y), int(wheel_delta), 0)
+    
+    def mouse_event_leftdown(self, x, y):
+        # Windows용 마우스 왼쪽 버튼 누르기 이벤트 발생
+        MOUSEEVENTF_LEFTDOWN = 0x0002
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, int(x), int(y), 0, 0)
+    
+    def mouse_event_leftup(self, x, y):
+        # Windows용 마우스 왼쪽 버튼 누르기 이벤트 발생
+        MOUSEEVENTF_LEFTUP = 0x0004
+        ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, int(x), int(y), 0, 0)
+
 
     def check_and_scroll(self):
         # gaze 위치에 따라 마우스 휠 이벤트 발생 (paintEvent에서 분리)
@@ -118,10 +138,10 @@ class Overlay(QtWidgets.QWidget):
         if now - self.last_scroll_time < self.scroll_interval:
             return  # 너무 자주 스크롤 방지
         if y < scrollyu:
-            self.mouse_event(x, y, MOUSE_SCROOL_STEP)
+            self.mouse_event_scroll(x, y, MOUSE_SCROOL_STEP)
             self.last_scroll_time = now
         elif y > scrollyd:
-            self.mouse_event(x, y, -MOUSE_SCROOL_STEP)
+            self.mouse_event_scroll(x, y, -MOUSE_SCROOL_STEP)
             self.last_scroll_time = now
 
     def paintEvent(self, event):
@@ -153,14 +173,23 @@ class Overlay(QtWidgets.QWidget):
                     
                     scrollyu = int(self.screen_height * MOUSE_SCROOL_AREA)
                     scrollyd = int(self.screen_height * (1 - MOUSE_SCROOL_AREA))
-
+                    mouse_opened = self.mouth_open_ratio > MOUSE_CLICK_RATIO
                     if self.mouseHooking:
                         # # 마우스 위치 업데이트
                         QtGui.QCursor.setPos(x, y)
+                        # 마우스 클릭
+                        if mouse_opened:
+                            self.mouse_event_leftdown(x, y)
+                        else:
+                            self.mouse_event_leftup(x, y)
                     else:
                         # 파란색 원으로 gaze 위치 표시
-                        painter.setBrush(QtGui.QBrush(QtCore.Qt.blue))
-                        painter.setPen(QtGui.QPen(QtCore.Qt.blue, 2))
+                        if mouse_opened:
+                            color = QtCore.Qt.red
+                        else:
+                            color = QtCore.Qt.blue
+                        painter.setBrush(QtGui.QBrush(color))
+                        painter.setPen(QtGui.QPen(color, 2))
                         painter.drawEllipse(x-10, y-10, 20, 20)
 
                     # 마우스 스크롤 영역 표시
@@ -266,6 +295,7 @@ if __name__ == "__main__":
     # gaze 수신 스레드 시작
     receiver = GazeReceiver(SERVER_IP, SERVER_PORT)
     receiver.gaze_signal.connect(overlay.set_gaze)
+    receiver.mouth_open_signal.connect(overlay.set_mouth_open_ratio)
     receiver.start()
 
     # 키보드 이벤트 처리
