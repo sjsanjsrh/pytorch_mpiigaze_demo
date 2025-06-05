@@ -10,3 +10,5 @@ timm
 torch
 torchvision
 pyautogui
+PyQt5
+keyboard
