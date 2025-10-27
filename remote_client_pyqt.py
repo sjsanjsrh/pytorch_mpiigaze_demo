@@ -236,9 +236,9 @@ class Overlay(QtWidgets.QWidget):
             # 삼각형 화살표 끝 부분 그리기
             arraw_size = 20
             painter.drawPolygon(QtGui.QPolygon([
-                QtCore.QPoint(tx + v[1]*arraw_size/2 - v[0]*arraw_size, ty - v[0]*arraw_size/2 - v[1]*arraw_size),
-                QtCore.QPoint(tx - v[1]*arraw_size/2 - v[0]*arraw_size, ty + v[0]*arraw_size/2 - v[1]*arraw_size),
-                QtCore.QPoint(tx, ty)
+                QtCore.QPoint(int(tx + v[1]*arraw_size/2 - v[0]*arraw_size), int(ty - v[0]*arraw_size/2 - v[1]*arraw_size)),
+                QtCore.QPoint(int(tx - v[1]*arraw_size/2 - v[0]*arraw_size), int(ty + v[0]*arraw_size/2 - v[1]*arraw_size)),
+                QtCore.QPoint(int(tx), int(ty))
             ]))
             # 노란색 점 표시, 기록 안 함
             if dt < 1.0:
