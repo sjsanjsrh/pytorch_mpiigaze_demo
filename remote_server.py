@@ -9,6 +9,9 @@ import cv2
 from ptgaze.common import Face
 import threading
 from ptgaze.point.mouth_open import mouth_open_ratio
+from ptgaze.utils import (download_ethxgaze_model, download_mpiigaze_model, 
+                          download_mpiifacegaze_model)
+import time
 
 
 HOST, PORT = "0.0.0.0", 25500
@@ -24,8 +27,7 @@ def _get_ddbox_size(face: Face) -> float:
     return length[0] * length[1]
 
 class RemoteServer:
-    def __init__(self, tflite_path, config):
-        self.tflite_path = utils._expanduser(tflite_path)
+    def __init__(self, config):
         self.config = config
         utils.expanduser_all(self.config)
         self.gaze_estimator = GazeEstimator(config)
@@ -76,6 +78,12 @@ class RemoteServer:
         
         print("Server started ")
         
+        # FPS 측정 변수
+        frame_count = 0
+        fps_update_time = time.time()
+        fps = 0
+        inference_count = 0
+        
         try:
             while True:
                 ok, frame = self._cap.read()
@@ -96,6 +104,15 @@ class RemoteServer:
                         max_size = size
                         face = f
                 
+                # FPS 계산
+                frame_count += 1
+                current_time = time.time()
+                if current_time - fps_update_time >= 1.0:
+                    fps = frame_count / (current_time - fps_update_time)
+                    print(f"FPS: {fps:.1f} | Inferences: {inference_count}")
+                    frame_count = 0
+                    fps_update_time = current_time
+                
                 if face is None:
                     continue
 
@@ -110,12 +127,22 @@ class RemoteServer:
                     cv2.imshow("Remote Server", flip)
                     cv2.waitKey(1)
 
+                # GPU 추론 시작
+                inference_count += 1
                 self.gaze_estimator.estimate_gaze(undistorted, face)
 
                 data = []
-                for key in self.gaze_estimator.EYE_KEYS:
-                    eye = getattr(face, key.name.lower())
-                    data.extend(eye.normalized_gaze_vector)
+                if self.config.mode == 'MPIIGaze':
+                    # MPIIGaze: 각 눈마다 시선 벡터가 있음
+                    for key in self.gaze_estimator.EYE_KEYS:
+                        eye = getattr(face, key.name.lower())
+                        data.extend(eye.normalized_gaze_vector)
+                else:
+                    # ETH-XGaze, MPIIFaceGaze: 얼굴 전체의 시선 벡터 사용
+                    data.extend(face.normalized_gaze_vector)
+                    # 양쪽 눈에 같은 값 사용 (호환성을 위해)
+                    data.extend(face.normalized_gaze_vector)
+                
                 data.append(mouth_open_ratio(face))
                 data = np.array(data, dtype=np.float32)
 
@@ -152,8 +179,42 @@ class RemoteServer:
 
 if __name__ == "__main__":
 
-    config = OmegaConf.load('./ptgaze/data/configs/edge.yaml')
-    tflite_path = '~/.ptgaze/models/mpiigaze.tflite'
+    config = OmegaConf.load('./ptgaze/data/configs/edge_xgaze.yaml')
+    
+    # 설정에 따라 자동으로 모델 다운로드
+    if config.mode == 'MPIIGaze':
+        download_mpiigaze_model()
+    elif config.mode == 'MPIIFaceGaze':
+        download_mpiifacegaze_model()
+    elif config.mode == 'ETH-XGaze':
+        download_ethxgaze_model()
+    
+    # 디바이스 정보 출력
+    print(f"\n{'='*50}")
+    print(f"Mode: {config.mode}")
+    print(f"Device: {config.device}")
+    if config.device == 'dml':
+        try:
+            import torch_directml
+            device_count = torch_directml.device_count()
+            dml_device = torch_directml.device()
+            print(f"DirectML Device: {dml_device}")
+            print(f"DirectML Device Count: {device_count}")
+            for i in range(device_count):
+                try:
+                    name = torch_directml.device_name(i)
+                    marker = " (Using)" if i == 0 else ""
+                    print(f"  Device {i}: {name}{marker}")
+                except:
+                    print(f"  Device {i}: (Unknown)")
+        except Exception as e:
+            print(f"DirectML info error: {e}")
+    elif config.device == 'cuda':
+        import torch
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"CUDA Device: {torch.cuda.get_device_name(0)}")
+    print(f"{'='*50}\n")
 
-    server = RemoteServer(tflite_path, config)
+    server = RemoteServer(config)
     server.run()

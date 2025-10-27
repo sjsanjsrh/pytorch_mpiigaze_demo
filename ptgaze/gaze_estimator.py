@@ -32,13 +32,23 @@ class GazeEstimator:
             self._config.gaze_estimator.normalized_camera_distance)
         self._gaze_estimation_model = self._load_model()
         self._transform = create_transform(config)
+    
+    def _get_device(self):
+        """DirectML 지원을 포함한 디바이스 반환"""
+        if self._config.device == 'dml':
+            import torch_directml
+            return torch_directml.device()
+        else:
+            return torch.device(self._config.device)
 
     def _load_model(self) -> torch.nn.Module:
         model = create_model(self._config)
         checkpoint = torch.load(self._config.gaze_estimator.checkpoint,
-                                map_location='cpu')
+                                map_location='cpu', weights_only=False)
         model.load_state_dict(checkpoint['model'])
-        model.to(torch.device(self._config.device))
+        
+        device = self._get_device()
+        model.to(device)
         model.eval()
         return model
 
@@ -82,7 +92,7 @@ class GazeEstimator:
         head_poses = np.array(head_poses).astype(np.float32)
         head_poses = torch.from_numpy(head_poses)
 
-        device = torch.device(self._config.device)
+        device = self._get_device()
         images = images.to(device)
         head_poses = head_poses.to(device)
         predictions = self._gaze_estimation_model(images, head_poses)
@@ -100,7 +110,7 @@ class GazeEstimator:
     def _run_mpiifacegaze_model(self, face: Face) -> None:
         image = self._transform(face.normalized_image).unsqueeze(0)
 
-        device = torch.device(self._config.device)
+        device = self._get_device()
         image = image.to(device)
         prediction = self._gaze_estimation_model(image)
         prediction = prediction.cpu().numpy()
@@ -113,7 +123,7 @@ class GazeEstimator:
     def _run_ethxgaze_model(self, face: Face) -> None:
         image = self._transform(face.normalized_image).unsqueeze(0)
 
-        device = torch.device(self._config.device)
+        device = self._get_device()
         image = image.to(device)
         prediction = self._gaze_estimation_model(image)
         prediction = prediction.cpu().numpy()
