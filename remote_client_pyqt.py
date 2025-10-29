@@ -32,6 +32,11 @@ MOUTH_SCROLL_LOCKOUT_AFTER_OPEN = 0.45  # 입을 벌린 직후 스크롤을 잠�
 MOUTH_JOYSTICK_MIN_INTERVAL = 0.05  # 조이스틱 최대 속도일 때 스크롤 간격(초)
 MOUTH_JOYSTICK_MAX_INTERVAL = 0.2  # 조이스틱 최소 속도일 때 스크롤 간격(초)
 MOUTH_JOYSTICK_BASE_STRENGTH = 0.35  # 최소 스크롤 강도 배율
+MOUTH_COMMAND_IDLE_SPEED = 0.1  # 입 명령 중 기본 커서 이동 속도 배율
+MOUTH_COMMAND_RAMP_INITIAL = 0.25  # 입 명령 가속 시작 시 속도/강도 배율
+MOUTH_COMMAND_RAMP_DURATION = 1.2  # 가속이 최고 속도에 도달하는 시간(초)
+MOUTH_COMMAND_RAMP_MAX = 0.5  # 입 명령 가속 후 최대 속도/강도 배율
+MOUTH_SCROLL_OPEN_TOLERANCE = 0.008  # 스크롤 시 허용할 추가 입벌림 여유
 
 NOISE_R = 5
 NOISE_Q = 1e-9
@@ -129,6 +134,11 @@ class Overlay(QtWidgets.QWidget):
         self.center_offset = 0.0
         self.last_mouth_update = 0.0
         self.last_mouth_open_time = 0.0
+        self.mouth_drag_active = False
+        self.mouth_drag_start = 0.0
+        self.cursor_speed_factor = 1.0
+        self.joystick_scroll_active = False
+        self.joystick_scroll_start = 0.0
 
         self.mouseHooking = False
 
@@ -226,6 +236,38 @@ class Overlay(QtWidgets.QWidget):
         MOUSEEVENTF_LEFTUP = 0x0004
         ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, int(x), int(y), 0, 0)
 
+    def _update_cursor_position(self, target_x, target_y, now, mouse_opened, command_active):
+        """Move cursor toward the target with adaptive speed during mouth commands."""
+        if mouse_opened:
+            if not self.mouth_drag_active:
+                self.mouth_drag_active = True
+                self.mouth_drag_start = now
+            elapsed = max(0.0, now - self.mouth_drag_start)
+            ramp = min(1.0, elapsed / max(MOUTH_COMMAND_RAMP_DURATION, 1e-6))
+            factor = MOUTH_COMMAND_RAMP_INITIAL + ramp * (MOUTH_COMMAND_RAMP_MAX - MOUTH_COMMAND_RAMP_INITIAL)
+        else:
+            if self.mouth_drag_active:
+                self.mouth_drag_active = False
+                self.mouth_drag_start = 0.0
+            factor = MOUTH_COMMAND_IDLE_SPEED if command_active else 1.0
+
+        factor = max(0.05, min(MOUTH_COMMAND_RAMP_MAX, factor))
+        self.cursor_speed_factor = factor
+
+        current_pos = QtGui.QCursor.pos()
+        current_x = float(current_pos.x())
+        current_y = float(current_pos.y())
+
+        if factor >= 0.999 or (abs(target_x - current_x) < 1.0 and abs(target_y - current_y) < 1.0):
+            QtGui.QCursor.setPos(int(round(target_x)), int(round(target_y)))
+            return QtGui.QCursor.pos()
+
+        new_x = current_x + (target_x - current_x) * factor
+        new_y = current_y + (target_y - current_y) * factor
+
+        QtGui.QCursor.setPos(int(round(new_x)), int(round(new_y)))
+        return QtGui.QCursor.pos()
+
     def draw_mouth_visualization(self, painter, now):
         ratio = float(self.mouth_open_ratio) if self.mouth_open_ratio is not None else 0.0
         ratio = max(0.0, min(ratio, 1.2))
@@ -265,10 +307,23 @@ class Overlay(QtWidgets.QWidget):
         painter.setBrush(QtGui.QColor(0, 180, 255, ratio_fill_alpha))
         painter.drawRect(left, top, int(bar_width * normalized_ratio), bar_height)
 
-        threshold_ratio = min(1.0, MOUSE_CLICK_RATIO / max(MOUTH_VISUAL_MAX_RATIO, 1e-6))
-        threshold_x = left + int(bar_width * threshold_ratio)
+        scale = max(MOUTH_VISUAL_MAX_RATIO, 1e-6)
+        closed_ratio = min(1.0, MOUTH_CLOSED_THRESHOLD / scale)
+        closed_x = left + int(bar_width * closed_ratio)
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 220, 120, 220), 1, QtCore.Qt.DashLine))
+        painter.drawLine(closed_x, top - 4, closed_x, top + bar_height + 4)
+
+        if MOUTH_SCROLL_OPEN_TOLERANCE > 1e-6:
+            tol_value = MOUTH_CLOSED_THRESHOLD + MOUTH_SCROLL_OPEN_TOLERANCE
+            tol_ratio = min(1.0, tol_value / scale)
+            tol_x = left + int(bar_width * tol_ratio)
+            painter.setPen(QtGui.QPen(QtGui.QColor(255, 170, 60, 200), 1, QtCore.Qt.DotLine))
+            painter.drawLine(tol_x, top - 4, tol_x, top + bar_height + 4)
+
+        click_ratio = min(1.0, MOUSE_CLICK_RATIO / scale)
+        click_x = left + int(bar_width * click_ratio)
         painter.setPen(QtGui.QPen(QtGui.QColor(255, 90, 90, 230), 2))
-        painter.drawLine(threshold_x, top - 6, threshold_x, top + bar_height + 6)
+        painter.drawLine(click_x, top - 6, click_x, top + bar_height + 6)
 
         ratio_pen_color = QtGui.QColor(255, 120, 120) if ratio >= MOUSE_CLICK_RATIO else QtCore.Qt.white
         painter.setPen(QtGui.QPen(ratio_pen_color))
@@ -276,7 +331,7 @@ class Overlay(QtWidgets.QWidget):
         painter.drawText(
             left - 4,
             top + bar_height + 24,
-            f"입벌림 {ratio:.3f} / {MOUSE_CLICK_RATIO:.3f}"
+            f"입벌림 {ratio:.3f}  닫힘≤{MOUTH_CLOSED_THRESHOLD:.3f}  클릭≥{MOUSE_CLICK_RATIO:.3f}"
         )
 
         painter.setFont(QtGui.QFont('Arial', 12))
@@ -352,40 +407,74 @@ class Overlay(QtWidgets.QWidget):
             self.filtered_mouth_center is None or
             self.center_baseline is None
         ):
+            if self.joystick_scroll_active:
+                self.joystick_scroll_active = False
+                self.joystick_scroll_start = 0.0
             return
 
-        if self.mouth_open_ratio > MOUTH_CLOSED_THRESHOLD:
+        open_excess = max(0.0, self.mouth_open_ratio - MOUTH_CLOSED_THRESHOLD)
+        if open_excess > MOUTH_SCROLL_OPEN_TOLERANCE:
+            if self.joystick_scroll_active:
+                self.joystick_scroll_active = False
+                self.joystick_scroll_start = 0.0
             return
 
         if not self.mouseHooking or self.mouse_pressed:
+            if self.joystick_scroll_active:
+                self.joystick_scroll_active = False
+                self.joystick_scroll_start = 0.0
             return
 
         now = time.time()
         if now - self.last_mouth_open_time < MOUTH_SCROLL_LOCKOUT_AFTER_OPEN:
+            if self.joystick_scroll_active:
+                self.joystick_scroll_active = False
+                self.joystick_scroll_start = 0.0
             return
 
         offset = self.center_offset
         abs_offset = abs(offset)
         if abs_offset <= MOUTH_CENTER_DELTA_THRESHOLD:
+            if self.joystick_scroll_active:
+                self.joystick_scroll_active = False
+                self.joystick_scroll_start = 0.0
             return
+
+        if not self.joystick_scroll_active:
+            self.joystick_scroll_active = True
+            self.joystick_scroll_start = now
 
         # 기준 임계값을 넘는 정도를 0~1 범위로 정규화
         effective_range = max(MOUTH_CENTER_VISUAL_RANGE - MOUTH_CENTER_DELTA_THRESHOLD, 1e-6)
         normalized = min(1.0, (abs_offset - MOUTH_CENTER_DELTA_THRESHOLD) / effective_range)
 
+        elapsed = max(0.0, now - self.joystick_scroll_start)
+        ramp = min(1.0, elapsed / max(MOUTH_COMMAND_RAMP_DURATION, 1e-6))
+        gain = MOUTH_COMMAND_RAMP_INITIAL + (MOUTH_COMMAND_RAMP_MAX - MOUTH_COMMAND_RAMP_INITIAL) * ramp
+        open_factor = 1.0
+        if MOUTH_SCROLL_OPEN_TOLERANCE > 1e-6:
+            open_factor = max(0.0, min(1.0, 1.0 - (open_excess / MOUTH_SCROLL_OPEN_TOLERANCE)))
+        gain = max(0.0, min(1.0, gain * open_factor))
+        effective_normalized = max(0.0, min(1.0, normalized * gain))
+
         # 강도와 간격을 변형해 조이스틱 감각을 제공
         interval = max(
             MOUTH_JOYSTICK_MIN_INTERVAL,
-            MOUTH_JOYSTICK_MAX_INTERVAL - (MOUTH_JOYSTICK_MAX_INTERVAL - MOUTH_JOYSTICK_MIN_INTERVAL) * normalized
+            MOUTH_JOYSTICK_MAX_INTERVAL - (MOUTH_JOYSTICK_MAX_INTERVAL - MOUTH_JOYSTICK_MIN_INTERVAL) * effective_normalized
         )
         if now - self.last_scroll_time < interval:
             return
 
-        strength = MOUTH_JOYSTICK_BASE_STRENGTH + (1.0 - MOUTH_JOYSTICK_BASE_STRENGTH) * normalized
+        strength = (
+            MOUTH_JOYSTICK_BASE_STRENGTH * gain +
+            (1.0 - MOUTH_JOYSTICK_BASE_STRENGTH) * effective_normalized
+        )
+        strength = max(0.05, min(1.0, strength))
         direction = 1 if offset < 0 else -1
         wheel_delta = int(direction * MOUSE_SCROOL_STEP * strength)
         if wheel_delta == 0:
-            wheel_delta = direction * max(1, int(MOUSE_SCROOL_STEP * MOUTH_JOYSTICK_BASE_STRENGTH))
+            fallback = MOUSE_SCROOL_STEP * max(0.05, MOUTH_JOYSTICK_BASE_STRENGTH * gain)
+            wheel_delta = direction * max(1, int(fallback))
 
         cursor_pos = QtGui.QCursor.pos()
         self.mouse_event_scroll(cursor_pos.x(), cursor_pos.y(), wheel_delta)
@@ -422,17 +511,27 @@ class Overlay(QtWidgets.QWidget):
                         self.mouth_open_ratio is not None and
                         self.mouth_open_ratio > MOUSE_CLICK_RATIO
                     )
+
+                    command_active = False
+                    if self.mouth_open_ratio is not None and self.mouth_open_ratio > MOUTH_CLOSED_THRESHOLD:
+                        command_active = True
+                    elif self.center_baseline is not None and abs(self.center_offset) > MOUTH_CENTER_DELTA_THRESHOLD:
+                        command_active = True
+
                     if self.mouseHooking:
-                        # # 마우스 위치 업데이트
-                        QtGui.QCursor.setPos(x, y)
+                        cursor_pos = self._update_cursor_position(float(x), float(y), now, mouse_opened, command_active)
                         # 마우스 클릭
                         if mouse_opened and not self.mouse_pressed:
-                            self.mouse_event_leftdown(x, y)
+                            self.mouse_event_leftdown(cursor_pos.x(), cursor_pos.y())
                             self.mouse_pressed = True
                         elif not mouse_opened and self.mouse_pressed:
-                            self.mouse_event_leftup(x, y)
+                            self.mouse_event_leftup(cursor_pos.x(), cursor_pos.y())
                             self.mouse_pressed = False
                     else:
+                        self.cursor_speed_factor = 1.0
+                        if self.mouth_drag_active:
+                            self.mouth_drag_active = False
+                            self.mouth_drag_start = 0.0
                         if self.mouse_pressed:
                             cursor_pos = QtGui.QCursor.pos()
                             self.mouse_event_leftup(cursor_pos.x(), cursor_pos.y())
