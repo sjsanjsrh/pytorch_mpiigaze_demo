@@ -3,11 +3,11 @@ import socket
 import numpy as np
 import time
 import keyboard
-from PyQt5 import QtCore, QtGui, QtWidgets
 from ptgaze.point.calibration import Calibration
 from ptgaze.common.face import Face
 from ptgaze.common.face_parts import FacePartsName
 import ctypes
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 # 서버 주소와 포트
 SERVER_IP = '127.0.0.1'  # 예: '192.168.0.10'
@@ -16,7 +16,7 @@ SERVER_PORT = 25500
 MOUSE_HOOKING_KEY = '['  # 마우스 위치 업데이트 토글 키
 RESET_CALIBRATION_KEY = ']'  # 캘리브레이션 초기화 키
 
-MOUSE_SCROOL_AREA = 0.01  # 마우스 스크롤 인식영역 (0.05 = 5% 화면 높이)
+MOUSE_SCROOL_AREA = 0.02  # 마우스 스크롤 인식영역 (0.05 = 5% 화면 높이)
 MOUSE_SCROOL_STEP = 100  # 마우스 스크롤 시 이동 거리
 
 MOUSE_CLICK_RATIO = 0.1  # 마우스 클릭 인식 비율
