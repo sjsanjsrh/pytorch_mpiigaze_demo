@@ -8,7 +8,7 @@ from ptgaze.demo import Demo
 import cv2
 from ptgaze.common import Face
 import threading
-from ptgaze.point.mouth_open import mouth_open_ratio
+from ptgaze.point.mouth_open import mouth_metrics
 from ptgaze.utils import (download_ethxgaze_model, download_mpiigaze_model, 
                           download_mpiifacegaze_model)
 import time
@@ -143,7 +143,8 @@ class RemoteServer:
                     # 양쪽 눈에 같은 값 사용 (호환성을 위해)
                     data.extend(face.normalized_gaze_vector)
                 
-                data.append(mouth_open_ratio(face))
+                ratio, center = mouth_metrics(face)
+                data.extend([ratio, center])
                 data = np.array(data, dtype=np.float32)
 
                 data = data.astype(np.float32).tobytes()
@@ -179,6 +180,7 @@ class RemoteServer:
 
 if __name__ == "__main__":
 
+    # config = OmegaConf.load('./ptgaze/data/configs/edge.yaml')
     config = OmegaConf.load('./ptgaze/data/configs/edge_xgaze.yaml')
     
     # 설정에 따라 자동으로 모델 다운로드

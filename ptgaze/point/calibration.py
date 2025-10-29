@@ -37,9 +37,6 @@ class Calibration:
             eye_angles[i][0] = -eye_angles[i][0]
             eye_composition[i] = eye_angles[i] - eye_positions[i]
 
-        cross_product = np.cross(eye_composition[0], eye_composition[1])
-        res = cross_product[:2]/-cross_product[2]
-
         res = np.sum(eye_composition, axis=0)
         res = res[:2] / -res[2]
 
