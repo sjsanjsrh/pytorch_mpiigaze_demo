@@ -24,6 +24,24 @@ Anaconda Prompt 실행  *시작 프로그렘 검색*
 ## 3. 실시간 시선 추적 실행
 `python ./run.py` # 해당 파일 안에서 실행인수 설정 가능
 
+## 4. 입모양 분석 모델 학습 및 실시간 실행
+```
+nalysis/landmark_feature_selection.py `
+  --dataset data/mouth_landmark_dataset.npz `
+  --keep-top 200 `
+  --out-prefix artifacts/landmark_selection/mouth_landmarks
+```
+
+```
+train_mouth_regressor.py --dataset data/mouth_landmark_dataset.npz --indices artifacts/landmark_selection/mouth_landmarks_selected_indices.npy --out artifacts/models/mouth_regressor.pt --epochs 1600 --batch-size 32 --hidden-dim 4 --lr 1e-3
+```
+
+```
+mouth_regressor_live.py `
+  --model artifacts/models/mouth_regressor.pt `
+  --draw-mesh `
+  --draw-selected
+```
 
 
 # A demo program of gaze estimation models (MPIIGaze, MPIIFaceGaze, ETH-XGaze)
