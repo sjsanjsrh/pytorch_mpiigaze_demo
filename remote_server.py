@@ -1,17 +1,28 @@
 import socket
 import struct
-import numpy as np
-from omegaconf import OmegaConf
-from ptgaze.gaze_estimator import GazeEstimator
-import ptgaze.utils as utils
-from ptgaze.demo import Demo
-import cv2
-from ptgaze.common import Face
 import threading
-from ptgaze.point.mouth_open import mouth_metrics
-from ptgaze.utils import (download_ethxgaze_model, download_mpiigaze_model, 
-                          download_mpiifacegaze_model)
 import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+import torch
+from omegaconf import OmegaConf
+
+import ptgaze.utils as utils
+from ptgaze.common import Face
+from ptgaze.demo import Demo
+from ptgaze.gaze_estimator import GazeEstimator
+from ptgaze.point.mouth_regression import (
+    load_regressor,
+    normalise_landmarks,
+    prepare_regressor_features,
+)
+from ptgaze.utils import (
+    download_ethxgaze_model,
+    download_mpiifacegaze_model,
+    download_mpiigaze_model,
+)
 
 
 HOST, PORT = "0.0.0.0", 25500
@@ -40,6 +51,35 @@ class RemoteServer:
 
         self._bind_thread = None
         self._cap = None
+        self.mouth_device = torch.device("cpu")
+        self.mouth_model = None
+        self.mouth_mean = None
+        self.mouth_std = None
+        self.mouth_indices = None
+        self.mouth_dims = 2
+        self._load_mouth_regressor()
+
+    def _load_mouth_regressor(self) -> None:
+        """Initialise mouth regression model if available."""
+        default_path = Path("artifacts/models/mouth_regressor.pt")
+        configured_path = OmegaConf.select(self.config, "mouth_regressor.model_path")
+        model_path = Path(configured_path) if configured_path is not None else default_path
+        if not model_path.exists():
+            print(f"[WARN] Mouth regressor missing at {model_path}. Using legacy mouth metrics.")
+            return
+
+        try:
+            self.mouth_model, cfg = load_regressor(model_path, self.mouth_device)
+            self.mouth_mean = np.asarray(cfg["mean"], dtype=np.float32)
+            self.mouth_std = np.asarray(cfg["std"], dtype=np.float32)
+            indices = cfg.get("indices")
+            if indices is not None:
+                self.mouth_indices = np.asarray(indices, dtype=np.int64)
+            self.mouth_dims = int(cfg.get("dims", 2))
+            print(f"[INFO] Mouth regressor loaded from {model_path}")
+        except Exception as exc:
+            self.mouth_model = None
+            print(f"[WARN] Failed to load mouth regressor: {exc}. Falling back to legacy metrics.")
     
     def send_command(self, command: str, addr):
         """
@@ -143,8 +183,10 @@ class RemoteServer:
                     # 양쪽 눈에 같은 값 사용 (호환성을 위해)
                     data.extend(face.normalized_gaze_vector)
                 
-                ratio, center = mouth_metrics(face)
-                data.extend([ratio, center])
+                mouth_values = self._infer_mouth_outputs(face, undistorted.shape[1], undistorted.shape[0])
+                if mouth_values is None:
+                    mouth_values = (0.0, 0.0)
+                data.extend(mouth_values)
                 data = np.array(data, dtype=np.float32)
 
                 data = data.astype(np.float32).tobytes()
@@ -177,6 +219,27 @@ class RemoteServer:
         print("All clients cleared.")
         self.server_socket = None
         print("Server socket set to None.")
+
+    def _infer_mouth_outputs(self, face: Face, width: int, height: int):
+        """Run mouth regression if the model is loaded."""
+        if self.mouth_model is None:
+            return None
+        try:
+            coords_norm = normalise_landmarks(face.landmarks, width, height, self.mouth_dims)
+            features, _, _ = prepare_regressor_features(
+                coords_norm,
+                self.mouth_dims,
+                self.mouth_indices,
+                self.mouth_mean,
+                self.mouth_std,
+            )
+            tensor = torch.from_numpy(features).unsqueeze(0).to(self.mouth_device)
+            with torch.no_grad():
+                openness, lip_position = self.mouth_model(tensor)
+            return float(openness.item()), float(lip_position.item())
+        except Exception as exc:
+            print(f"[WARN] Mouth regression failed: {exc}")
+            return None
 
 if __name__ == "__main__":
 

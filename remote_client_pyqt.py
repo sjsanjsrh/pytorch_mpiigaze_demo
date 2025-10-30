@@ -16,27 +16,30 @@ SERVER_PORT = 25500
 MOUSE_HOOKING_KEY = '['  # 마우스 위치 업데이트 토글 키
 RESET_CALIBRATION_KEY = ']'  # 캘리브레이션 초기화 키
 
-MOUSE_CLICK_RATIO = 0.1  # 마우스 클릭 인식 비율
-
 MOUSE_SCROOL_STEP = 100  # 마우스 스크롤 시 이동 거리
 
-MOUTH_CLOSED_THRESHOLD = 0.045  # 이 값 이하이면 입이 다물린 것으로 간주
-MOUTH_CENTER_DELTA_THRESHOLD = 0.01  # 입술 중심 이동량 임계값
-MOUTH_CENTER_SMOOTHING = 0.35  # 입술 중심 위치 지수평활 계수
-MOUTH_VISUAL_MAX_RATIO = 0.25  # 입벌림 시각화 최대 스케일
-MOUTH_CENTER_VISUAL_RANGE = 0.05  # 입술 중심 시각화 범위(+/-)
-MOUTH_CENTER_BASELINE_SMOOTHING = 0.1  # 입술 중심 기준 업데이트 계수
+MOUTH_OPEN_THRESHOLD = 0.45  # 이 값 이상이면 입이 열린 상태로 간주
+MOUTH_ACTIVE_THRESHOLD = 0.5  # 커서 제어 가속을 시작할 입벌림 수준
+MOUTH_CLICK_THRESHOLD = 0.65  # 클릭을 발생시킬 입벌림 수준
+MOUTH_SCROLL_OPEN_LIMIT = 0.55  # 이 이상 벌어지면 스크롤 명령을 잠시 비활성화
+MOUTH_SCROLL_LOCKOUT_AFTER_OPEN = 0.45  # 입을 크게 벌린 직후 스크롤을 잠시 막는 시간(초)
 MOUTH_DATA_STALE_TIMEOUT = 0.6  # 데이터 수신이 멈췄다고 간주할 시간(초)
-MOUTH_CENTER_OPEN_COMPENSATION = 0.3  # 입이 벌어졌을 때 중심 이동 보정 계수
-MOUTH_SCROLL_LOCKOUT_AFTER_OPEN = 0.45  # 입을 벌린 직후 스크롤을 잠시 막는 시간(초)
+MOUTH_VISUAL_MAX_OPEN = 1.0  # 시각화 막대 최대값
+
+LIP_SCROLL_THRESHOLD = 0.35  # 절대값이 이 이상이면 스크롤 활성화
+LIP_SCROLL_RELEASE = 0.22  # 절대값이 이 값 아래로 내려가면 스크롤 해제
+LIP_SCROLL_MAX = 0.9  # 스크롤 정규화 상한
+LIP_VISUAL_RANGE = 1.0  # 시각화 범위(+/-)
+LIP_COMMAND_THRESHOLD = 0.4  # 커서 제어 명령 활성화 기준
+
 MOUTH_JOYSTICK_MIN_INTERVAL = 0.05  # 조이스틱 최대 속도일 때 스크롤 간격(초)
 MOUTH_JOYSTICK_MAX_INTERVAL = 0.2  # 조이스틱 최소 속도일 때 스크롤 간격(초)
 MOUTH_JOYSTICK_BASE_STRENGTH = 0.35  # 최소 스크롤 강도 배율
+
 MOUTH_COMMAND_IDLE_SPEED = 0.1  # 입 명령 중 기본 커서 이동 속도 배율
 MOUTH_COMMAND_RAMP_INITIAL = 0.25  # 입 명령 가속 시작 시 속도/강도 배율
 MOUTH_COMMAND_RAMP_DURATION = 1.2  # 가속이 최고 속도에 도달하는 시간(초)
 MOUTH_COMMAND_RAMP_MAX = 0.5  # 입 명령 가속 후 최대 속도/강도 배율
-MOUTH_SCROLL_OPEN_TOLERANCE = 0.008  # 스크롤 시 허용할 추가 입벌림 여유
 
 NOISE_R = 5
 NOISE_Q = 1e-9
@@ -44,7 +47,7 @@ NOISE_Q = 1e-9
 class GazeReceiver(QtCore.QThread):
     # gaze 데이터 전달용 시그널
     gaze_signal = QtCore.pyqtSignal(object)
-    mouth_open_signal = QtCore.pyqtSignal(object)
+    mouth_signal = QtCore.pyqtSignal(object)
 
     def __init__(self, server_ip, server_port):
         super().__init__()
@@ -72,7 +75,7 @@ class GazeReceiver(QtCore.QThread):
                 if len(data) >= 24 + 8:
                     mouth_metrics = np.frombuffer(data[24:], dtype=np.float32)
                     if mouth_metrics.size >= 2:
-                        self.mouth_open_signal.emit(mouth_metrics[:2])
+                        self.mouth_signal.emit(mouth_metrics[:2])
             except socket.timeout:
                 timeout_count += 1
                 if timeout_count >= max_timeouts:
@@ -126,12 +129,9 @@ class Overlay(QtWidgets.QWidget):
         self.collected_points = [[], [], [], []]
         self.gaze = None
         self.filtered_gaze = None
-        self.mouth_open_ratio = None
-        self.filtered_mouth_center = None
+        self.mouth_openness = None
+        self.lip_position = None
         self.mouse_pressed = False
-        self.center_baseline = None
-        self.center_ratio_baseline = None
-        self.center_offset = 0.0
         self.last_mouth_update = 0.0
         self.last_mouth_open_time = 0.0
         self.mouth_drag_active = False
@@ -160,7 +160,7 @@ class Overlay(QtWidgets.QWidget):
     def set_gaze(self, gaze):
         self.gaze = gaze
     
-    def set_mouth_open_ratio(self, mouth_data):
+    def set_mouth_metrics(self, mouth_data):
         now = time.time()
         if mouth_data is None:
             return
@@ -169,57 +169,26 @@ class Overlay(QtWidgets.QWidget):
         if values.size < 2:
             return
 
-        ratio = float(values[0])
-        center = float(values[1])
-        if not np.isfinite(ratio) or not np.isfinite(center) or ratio < 0:
+        openness = float(np.clip(values[0], 0.0, 1.0))
+        lip_position = float(np.clip(values[1], -1.0, 1.0))
+        if not np.isfinite(openness) or not np.isfinite(lip_position):
             return
 
-        ratio = max(0.0, ratio)
-        self.mouth_open_ratio = ratio
-
-        if self.filtered_mouth_center is None:
-            self.filtered_mouth_center = center
+        if self.mouth_openness is None:
+            smoothed_open = openness
         else:
-            self.filtered_mouth_center = (
-                (1.0 - MOUTH_CENTER_SMOOTHING) * self.filtered_mouth_center +
-                MOUTH_CENTER_SMOOTHING * center
-            )
+            smoothed_open = 0.5 * self.mouth_openness + 0.5 * openness
+        if self.lip_position is None:
+            smoothed_lip = lip_position
+        else:
+            smoothed_lip = 0.6 * self.lip_position + 0.4 * lip_position
 
+        self.mouth_openness = smoothed_open
+        self.lip_position = smoothed_lip
         self.last_mouth_update = now
 
-        if self.filtered_mouth_center is not None:
-            if ratio <= MOUTH_CLOSED_THRESHOLD:
-                if self.center_baseline is None:
-                    self.center_baseline = self.filtered_mouth_center
-                else:
-                    self.center_baseline = (
-                        (1.0 - MOUTH_CENTER_BASELINE_SMOOTHING) * self.center_baseline +
-                        MOUTH_CENTER_BASELINE_SMOOTHING * self.filtered_mouth_center
-                    )
-
-                if self.center_ratio_baseline is None:
-                    self.center_ratio_baseline = ratio
-                else:
-                    self.center_ratio_baseline = (
-                        (1.0 - MOUTH_CENTER_BASELINE_SMOOTHING) * self.center_ratio_baseline +
-                        MOUTH_CENTER_BASELINE_SMOOTHING * ratio
-                    )
-            else:
-                self.last_mouth_open_time = now
-
-            base_center = self.center_baseline
-            base_ratio = self.center_ratio_baseline
-            if base_center is not None:
-                ratio_delta = 0.0
-                if base_ratio is not None:
-                    ratio_delta = max(0.0, ratio - base_ratio)
-                compensation = ratio_delta * MOUTH_CENTER_OPEN_COMPENSATION
-                adjusted_center = self.filtered_mouth_center - compensation
-                new_offset = adjusted_center - base_center
-                clamp_range = MOUTH_CENTER_VISUAL_RANGE * 2.0
-                self.center_offset = max(-clamp_range, min(new_offset, clamp_range))
-            else:
-                self.center_offset = 0.0
+        if self.mouth_openness >= MOUTH_OPEN_THRESHOLD:
+            self.last_mouth_open_time = now
 
     def mouse_event_scroll(self, x, y, wheel_delta=0):
         # Windows용 마우스 휠 이벤트 발생
@@ -269,151 +238,120 @@ class Overlay(QtWidgets.QWidget):
         return QtGui.QCursor.pos()
 
     def draw_mouth_visualization(self, painter, now):
-        ratio = float(self.mouth_open_ratio) if self.mouth_open_ratio is not None else 0.0
-        ratio = max(0.0, min(ratio, 1.2))
-        normalized_ratio = max(0.0, min(ratio / max(MOUTH_VISUAL_MAX_RATIO, 1e-6), 1.0))
-
-        center_value = self.filtered_mouth_center if self.filtered_mouth_center is not None else None
-        baseline = self.center_baseline
-        offset = self.center_offset if center_value is not None else 0.0
-        normalized_center = 0.0
-        if center_value is not None and baseline is not None:
-            normalized_center = max(
-                -1.0,
-                min(offset / max(MOUTH_CENTER_VISUAL_RANGE, 1e-6), 1.0)
-            )
+        openness = float(self.mouth_openness) if self.mouth_openness is not None else 0.0
+        openness = max(0.0, min(openness, 1.0))
+        lip_position = float(self.lip_position) if self.lip_position is not None else 0.0
+        lip_position = max(-1.0, min(lip_position, 1.0))
 
         data_is_stale = (now - self.last_mouth_update) > MOUTH_DATA_STALE_TIMEOUT
 
         bar_width = 240
         bar_height = 16
-        center_bar_height = 14
+        lip_bar_height = 14
         margin = 36
         left = self.screen_width - bar_width - margin
         top = margin
-
-        panel_height = 132
+        panel_height = 134
 
         painter.save()
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor(0, 0, 0, 160))
         painter.drawRoundedRect(left - 12, top - 18, bar_width + 24, panel_height, 10, 10)
 
-        # --- Mouth open ratio bar ---
+        # --- Openness bar ---
         painter.setBrush(QtGui.QColor(70, 70, 70, 220))
         painter.drawRect(left, top, bar_width, bar_height)
 
-        ratio_fill_alpha = 230 if not data_is_stale else 90
-        painter.setBrush(QtGui.QColor(0, 180, 255, ratio_fill_alpha))
-        painter.drawRect(left, top, int(bar_width * normalized_ratio), bar_height)
+        fill_alpha = 230 if not data_is_stale else 90
+        open_width = int(bar_width * min(1.0, openness / max(MOUTH_VISUAL_MAX_OPEN, 1e-6)))
+        painter.setBrush(QtGui.QColor(30, 180, 255, fill_alpha))
+        painter.drawRect(left, top, open_width, bar_height)
 
-        scale = max(MOUTH_VISUAL_MAX_RATIO, 1e-6)
-        closed_ratio = min(1.0, MOUTH_CLOSED_THRESHOLD / scale)
-        closed_x = left + int(bar_width * closed_ratio)
         painter.setPen(QtGui.QPen(QtGui.QColor(255, 220, 120, 220), 1, QtCore.Qt.DashLine))
-        painter.drawLine(closed_x, top - 4, closed_x, top + bar_height + 4)
+        for threshold, color, style in [
+            (MOUTH_OPEN_THRESHOLD, QtGui.QColor(255, 220, 120, 220), QtCore.Qt.DashLine),
+            (MOUTH_ACTIVE_THRESHOLD, QtGui.QColor(255, 180, 120, 220), QtCore.Qt.DotLine),
+            (MOUTH_CLICK_THRESHOLD, QtGui.QColor(255, 90, 90, 230), QtCore.Qt.SolidLine),
+        ]:
+            if threshold <= MOUTH_VISUAL_MAX_OPEN:
+                painter.setPen(QtGui.QPen(color, 1 if style != QtCore.Qt.SolidLine else 2, style))
+                x_pos = left + int(bar_width * (threshold / max(MOUTH_VISUAL_MAX_OPEN, 1e-6)))
+                painter.drawLine(x_pos, top - 4, x_pos, top + bar_height + 4)
 
-        if MOUTH_SCROLL_OPEN_TOLERANCE > 1e-6:
-            tol_value = MOUTH_CLOSED_THRESHOLD + MOUTH_SCROLL_OPEN_TOLERANCE
-            tol_ratio = min(1.0, tol_value / scale)
-            tol_x = left + int(bar_width * tol_ratio)
-            painter.setPen(QtGui.QPen(QtGui.QColor(255, 170, 60, 200), 1, QtCore.Qt.DotLine))
-            painter.drawLine(tol_x, top - 4, tol_x, top + bar_height + 4)
-
-        click_ratio = min(1.0, MOUSE_CLICK_RATIO / scale)
-        click_x = left + int(bar_width * click_ratio)
-        painter.setPen(QtGui.QPen(QtGui.QColor(255, 90, 90, 230), 2))
-        painter.drawLine(click_x, top - 6, click_x, top + bar_height + 6)
-
-        ratio_pen_color = QtGui.QColor(255, 120, 120) if ratio >= MOUSE_CLICK_RATIO else QtCore.Qt.white
-        painter.setPen(QtGui.QPen(ratio_pen_color))
+        painter.setPen(QtGui.QPen(QtCore.Qt.white))
         painter.setFont(QtGui.QFont('Arial', 14))
         painter.drawText(
             left - 4,
             top + bar_height + 24,
-            f"입벌림 {ratio:.3f}  닫힘≤{MOUTH_CLOSED_THRESHOLD:.3f}  클릭≥{MOUSE_CLICK_RATIO:.3f}"
+            f"입벌림 {openness:.3f}  클릭≥{MOUTH_CLICK_THRESHOLD:.2f}"
         )
 
         painter.setFont(QtGui.QFont('Arial', 12))
         painter.setPen(QtGui.QPen(QtGui.QColor(200, 200, 200, 200)))
         status_text = "입 모양 데이터 대기 중" if data_is_stale else (
-            "입 다물림" if ratio <= MOUTH_CLOSED_THRESHOLD else "입 벌림"
+            "입 벌림" if openness >= MOUTH_OPEN_THRESHOLD else "입 다물림"
         )
         painter.drawText(left - 4, top + bar_height + 44, status_text)
 
-        # --- Mouth center bar ---
-        center_bar_top = top + bar_height + 58
+        # --- Lip position bar ---
+        lip_top = top + bar_height + 58
         painter.setBrush(QtGui.QColor(70, 70, 70, 220))
         painter.setPen(QtCore.Qt.NoPen)
-        painter.drawRect(left, center_bar_top, bar_width, center_bar_height)
+        painter.drawRect(left, lip_top, bar_width, lip_bar_height)
 
         zero_x = left + bar_width // 2
         painter.setPen(QtGui.QPen(QtGui.QColor(190, 190, 190, 200), 1))
-        painter.drawLine(zero_x, center_bar_top - 4, zero_x, center_bar_top + center_bar_height + 4)
+        painter.drawLine(zero_x, lip_top - 4, zero_x, lip_top + lip_bar_height + 4)
 
-        threshold_norm = min(1.0, MOUTH_CENTER_DELTA_THRESHOLD / max(MOUTH_CENTER_VISUAL_RANGE, 1e-6))
-        threshold_pixels = int((bar_width / 2) * threshold_norm)
-        painter.setPen(QtGui.QPen(QtGui.QColor(255, 160, 0, 220), 1, QtCore.Qt.DashLine))
-        painter.drawLine(zero_x + threshold_pixels, center_bar_top, zero_x + threshold_pixels, center_bar_top + center_bar_height)
-        painter.drawLine(zero_x - threshold_pixels, center_bar_top, zero_x - threshold_pixels, center_bar_top + center_bar_height)
+        for threshold, color, style in [
+            (LIP_SCROLL_RELEASE, QtGui.QColor(120, 180, 255, 210), QtCore.Qt.DotLine),
+            (LIP_SCROLL_THRESHOLD, QtGui.QColor(255, 160, 0, 220), QtCore.Qt.DashLine),
+        ]:
+            if threshold <= LIP_VISUAL_RANGE:
+                offset = int((bar_width / 2) * (threshold / max(LIP_VISUAL_RANGE, 1e-6)))
+                painter.setPen(QtGui.QPen(color, 1, style))
+                painter.drawLine(zero_x + offset, lip_top, zero_x + offset, lip_top + lip_bar_height)
+                painter.drawLine(zero_x - offset, lip_top, zero_x - offset, lip_top + lip_bar_height)
 
-        center_fill_alpha = 210 if not data_is_stale else 90
-        if center_value is not None and baseline is not None:
-            fill_width = int((bar_width / 2) * abs(normalized_center))
-            fill_width = max(0, min(fill_width, bar_width // 2))
-            if fill_width > 0:
-                if normalized_center > 0:
-                    rect = QtCore.QRect(zero_x, center_bar_top, fill_width, center_bar_height)
-                    painter.setBrush(QtGui.QColor(255, 140, 60, center_fill_alpha))
-                    painter.drawRect(rect)
-                else:
-                    rect = QtCore.QRect(zero_x - fill_width, center_bar_top, fill_width, center_bar_height)
-                    painter.setBrush(QtGui.QColor(80, 180, 255, center_fill_alpha))
-                    painter.drawRect(rect)
+        lip_fill_alpha = 210 if not data_is_stale else 90
+        lip_width = int((bar_width / 2) * min(abs(lip_position) / max(LIP_VISUAL_RANGE, 1e-6), 1.0))
+        if lip_width > 0:
+            if lip_position >= 0:
+                rect = QtCore.QRect(zero_x, lip_top, lip_width, lip_bar_height)
+                painter.setBrush(QtGui.QColor(255, 140, 60, lip_fill_alpha))
+            else:
+                rect = QtCore.QRect(zero_x - lip_width, lip_top, lip_width, lip_bar_height)
+                painter.setBrush(QtGui.QColor(80, 180, 255, lip_fill_alpha))
+            painter.drawRect(rect)
 
         painter.setFont(QtGui.QFont('Arial', 13))
-        highlight_center = (
-            center_value is not None and baseline is not None and
-            abs(offset) >= MOUTH_CENTER_DELTA_THRESHOLD
+        painter.setPen(QtGui.QPen(QtCore.Qt.white))
+        painter.drawText(
+            left - 4,
+            lip_top + lip_bar_height + 24,
+            f"입술 위치 {lip_position:+.3f}  스크롤≥{LIP_SCROLL_THRESHOLD:.2f}"
         )
-        center_text_color = QtGui.QColor(255, 200, 90) if highlight_center else QtCore.Qt.white
-        painter.setPen(QtGui.QPen(center_text_color))
-        if center_value is not None and baseline is not None:
-            painter.drawText(
-                left - 4,
-                center_bar_top + center_bar_height + 24,
-                f"중심 Δ {offset:+.4f} / ±{MOUTH_CENTER_DELTA_THRESHOLD:.4f}  (기준 {baseline:.4f})"
-            )
-        elif center_value is not None:
-            painter.drawText(left - 4, center_bar_top + center_bar_height + 24, "중심 기준 계산 중...")
-        else:
-            painter.drawText(left - 4, center_bar_top + center_bar_height + 24, "중심 데이터 없음")
 
         painter.setPen(QtGui.QPen(QtGui.QColor(180, 180, 180, 220)))
         painter.setFont(QtGui.QFont('Arial', 11))
         mouse_status = "ON" if self.mouseHooking else "OFF"
         painter.drawText(
             left - 4,
-            center_bar_top + center_bar_height + 46,
+            lip_top + lip_bar_height + 46,
             f"마우스 제어 {mouse_status} ({MOUSE_HOOKING_KEY} 토글)"
         )
 
         painter.restore()
 
     def check_and_scroll(self):
-        # 입술 중심의 조이스틱 변위로 마우스 휠 이벤트 발생
-        if (
-            self.mouth_open_ratio is None or
-            self.filtered_mouth_center is None or
-            self.center_baseline is None
-        ):
+        if self.mouth_openness is None or self.lip_position is None:
             if self.joystick_scroll_active:
                 self.joystick_scroll_active = False
                 self.joystick_scroll_start = 0.0
             return
 
-        open_excess = max(0.0, self.mouth_open_ratio - MOUTH_CLOSED_THRESHOLD)
-        if open_excess > MOUTH_SCROLL_OPEN_TOLERANCE:
+        now = time.time()
+        if (now - self.last_mouth_update) > MOUTH_DATA_STALE_TIMEOUT:
             if self.joystick_scroll_active:
                 self.joystick_scroll_active = False
                 self.joystick_scroll_start = 0.0
@@ -425,52 +363,51 @@ class Overlay(QtWidgets.QWidget):
                 self.joystick_scroll_start = 0.0
             return
 
-        now = time.time()
+        if self.mouth_openness >= MOUTH_SCROLL_OPEN_LIMIT:
+            if self.joystick_scroll_active:
+                self.joystick_scroll_active = False
+                self.joystick_scroll_start = 0.0
+            return
+
         if now - self.last_mouth_open_time < MOUTH_SCROLL_LOCKOUT_AFTER_OPEN:
             if self.joystick_scroll_active:
                 self.joystick_scroll_active = False
                 self.joystick_scroll_start = 0.0
             return
 
-        offset = self.center_offset
-        abs_offset = abs(offset)
-        if abs_offset <= MOUTH_CENTER_DELTA_THRESHOLD:
-            if self.joystick_scroll_active:
+        abs_lip = abs(self.lip_position)
+        if self.joystick_scroll_active:
+            if abs_lip < LIP_SCROLL_RELEASE:
                 self.joystick_scroll_active = False
                 self.joystick_scroll_start = 0.0
-            return
-
-        if not self.joystick_scroll_active:
+                return
+        else:
+            if abs_lip < LIP_SCROLL_THRESHOLD:
+                return
             self.joystick_scroll_active = True
             self.joystick_scroll_start = now
 
-        # 기준 임계값을 넘는 정도를 0~1 범위로 정규화
-        effective_range = max(MOUTH_CENTER_VISUAL_RANGE - MOUTH_CENTER_DELTA_THRESHOLD, 1e-6)
-        normalized = min(1.0, (abs_offset - MOUTH_CENTER_DELTA_THRESHOLD) / effective_range)
+        normalized = (abs_lip - LIP_SCROLL_THRESHOLD) / max(LIP_SCROLL_MAX - LIP_SCROLL_THRESHOLD, 1e-6)
+        normalized = max(0.0, min(1.0, normalized))
 
         elapsed = max(0.0, now - self.joystick_scroll_start)
         ramp = min(1.0, elapsed / max(MOUTH_COMMAND_RAMP_DURATION, 1e-6))
         gain = MOUTH_COMMAND_RAMP_INITIAL + (MOUTH_COMMAND_RAMP_MAX - MOUTH_COMMAND_RAMP_INITIAL) * ramp
-        open_factor = 1.0
-        if MOUTH_SCROLL_OPEN_TOLERANCE > 1e-6:
-            open_factor = max(0.0, min(1.0, 1.0 - (open_excess / MOUTH_SCROLL_OPEN_TOLERANCE)))
-        gain = max(0.0, min(1.0, gain * open_factor))
-        effective_normalized = max(0.0, min(1.0, normalized * gain))
+        gain = max(0.0, min(1.0, gain))
 
-        # 강도와 간격을 변형해 조이스틱 감각을 제공
         interval = max(
             MOUTH_JOYSTICK_MIN_INTERVAL,
-            MOUTH_JOYSTICK_MAX_INTERVAL - (MOUTH_JOYSTICK_MAX_INTERVAL - MOUTH_JOYSTICK_MIN_INTERVAL) * effective_normalized
+            MOUTH_JOYSTICK_MAX_INTERVAL - (MOUTH_JOYSTICK_MAX_INTERVAL - MOUTH_JOYSTICK_MIN_INTERVAL) * normalized
         )
         if now - self.last_scroll_time < interval:
             return
 
         strength = (
             MOUTH_JOYSTICK_BASE_STRENGTH * gain +
-            (1.0 - MOUTH_JOYSTICK_BASE_STRENGTH) * effective_normalized
+            (1.0 - MOUTH_JOYSTICK_BASE_STRENGTH) * normalized
         )
         strength = max(0.05, min(1.0, strength))
-        direction = 1 if offset < 0 else -1
+        direction = -1 if self.lip_position > 0 else 1
         wheel_delta = int(direction * MOUSE_SCROOL_STEP * strength)
         if wheel_delta == 0:
             fallback = MOUSE_SCROOL_STEP * max(0.05, MOUTH_JOYSTICK_BASE_STRENGTH * gain)
@@ -508,14 +445,14 @@ class Overlay(QtWidgets.QWidget):
                     x, y = self.filtered_gaze
                     
                     mouse_opened = (
-                        self.mouth_open_ratio is not None and
-                        self.mouth_open_ratio > MOUSE_CLICK_RATIO
+                        self.mouth_openness is not None and
+                        self.mouth_openness >= MOUTH_CLICK_THRESHOLD
                     )
 
                     command_active = False
-                    if self.mouth_open_ratio is not None and self.mouth_open_ratio > MOUTH_CLOSED_THRESHOLD:
+                    if self.mouth_openness is not None and self.mouth_openness >= MOUTH_ACTIVE_THRESHOLD:
                         command_active = True
-                    elif self.center_baseline is not None and abs(self.center_offset) > MOUTH_CENTER_DELTA_THRESHOLD:
+                    elif self.lip_position is not None and abs(self.lip_position) >= LIP_COMMAND_THRESHOLD:
                         command_active = True
 
                     if self.mouseHooking:
@@ -645,7 +582,7 @@ if __name__ == "__main__":
     # gaze 수신 스레드 시작
     receiver = GazeReceiver(SERVER_IP, SERVER_PORT)
     receiver.gaze_signal.connect(overlay.set_gaze)
-    receiver.mouth_open_signal.connect(overlay.set_mouth_open_ratio)
+    receiver.mouth_signal.connect(overlay.set_mouth_metrics)
     receiver.start()
 
     # 키보드 이벤트 처리

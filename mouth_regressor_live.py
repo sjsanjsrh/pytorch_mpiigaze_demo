@@ -1,98 +1,19 @@
 import argparse
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Iterable
 
 import cv2
 import mediapipe as mp
 import numpy as np
 import torch
-from torch import nn
+
+from ptgaze.point.mouth_regression import (
+    load_regressor,
+    prepare_regressor_features,
+)
 
 
-class MouthRegressor(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, dropout: float) -> None:
-        super().__init__()
-        if hidden_dim > 0:
-            self.backbone = nn.Sequential(
-                nn.Linear(input_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-            )
-            self.openness_head = nn.Linear(hidden_dim, 1)
-            self.lip_position_head = nn.Linear(hidden_dim, 1)
-        else:
-            self.backbone = nn.Identity()
-            self.openness_head = nn.Linear(input_dim, 1)
-            self.lip_position_head = nn.Linear(input_dim, 1)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        features = self.backbone(x)
-        openness = torch.sigmoid(self.openness_head(features))
-        lip_position = torch.tanh(self.lip_position_head(features))
-        return openness, lip_position
-
-
-def load_model(path: Path, device: torch.device) -> Tuple[MouthRegressor, np.ndarray, np.ndarray, np.ndarray, int]:
-    bundle = torch.load(path, map_location="cpu", weights_only=False)
-    config = bundle["config"]
-    
-    model = MouthRegressor(
-        input_dim=int(config["input_dim"]),
-        hidden_dim=int(config["hidden_dim"]),
-        dropout=float(config["dropout"]),
-    )
-    model.load_state_dict(bundle["state_dict"])
-    model.to(device)
-    model.eval()
-    
-    mean = np.asarray(config["mean"], dtype=np.float32)
-    std = np.asarray(config["std"], dtype=np.float32)
-    indices = config.get("indices")
-    if indices is not None:
-        indices = np.asarray(indices, dtype=np.int64)
-    dims = int(config["dims"])
-    
-    return model, mean, std, indices, dims
-
-
-MOUTH_TOP = 13
-MOUTH_BOTTOM = 14
-MOUTH_LEFT = 61
-MOUTH_RIGHT = 291
-NOSE_TIP = 1
-CHIN = 152
-
-
-def compute_metrics(coords_xy: np.ndarray) -> Tuple[float, float]:
-    mouth_height = abs(coords_xy[MOUTH_BOTTOM][1] - coords_xy[MOUTH_TOP][1])
-    face_segment = abs(coords_xy[CHIN][1] - coords_xy[NOSE_TIP][1])
-    face_segment = max(face_segment, 1e-6)
-    ratio = float(mouth_height / face_segment)
-    mid_y = (coords_xy[MOUTH_TOP][1] + coords_xy[MOUTH_BOTTOM][1]) * 0.5
-    center = float((mid_y - coords_xy[NOSE_TIP][1]) / face_segment)
-    return ratio, center
-
-
-def prepare_features(
-    coords_norm: np.ndarray,
-    dims: int,
-    indices: np.ndarray | None,
-    mean: np.ndarray,
-    std: np.ndarray,
-) -> Tuple[np.ndarray, float, float]:
-    coords_use = coords_norm[:, :dims].astype(np.float32)
-
-    ratio, center = compute_metrics(coords_use[:, :2])
-    flat = coords_use.reshape(-1)
-    if indices is not None:
-        flat = flat[indices]
-    features = np.concatenate(([ratio, center], flat)).astype(np.float32)
-    std_safe = np.where(std == 0, 1.0, std).astype(np.float32)
-    features = (features - mean.astype(np.float32)) / std_safe
-    return features, ratio, center
-
-
-def unique_points(indices: np.ndarray, dims: int, total: int) -> Iterable[int]:
+def unique_points(indices: np.ndarray | None, dims: int, total: int) -> Iterable[int]:
     if indices is None:
         return []
     pts = np.unique(indices // max(dims, 1))
@@ -157,7 +78,13 @@ def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
     
-    model, mean, std, indices, dims = load_model(args.model, device)
+    model, config = load_regressor(args.model, device)
+    mean = np.asarray(config["mean"], dtype=np.float32)
+    std = np.asarray(config["std"], dtype=np.float32)
+    indices = config.get("indices")
+    if indices is not None:
+        indices = np.asarray(indices, dtype=np.int64)
+    dims = int(config["dims"])
     print(f"[INFO] Model loaded from {args.model}")
     
     cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
@@ -198,7 +125,7 @@ def main() -> None:
                 
                 try:
                     h, w, _ = frame.shape
-                    features, ratio, center = prepare_features(
+                    features, ratio, center = prepare_regressor_features(
                         coords_norm,
                         dims,
                         indices,
