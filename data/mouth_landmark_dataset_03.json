@@ -1,0 +1,14 @@
+{
+  "num_samples": 513,
+  "counts": {
+    "mouth_closed": 130,
+    "mouth_open": 118,
+    "lip_raise": 127,
+    "lip_lower": 138
+  },
+  "landmark_shape": [
+    468,
+    2
+  ],
+  "saved_at": "2025-10-31 12:15:41"
+}
