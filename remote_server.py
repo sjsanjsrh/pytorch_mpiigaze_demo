@@ -243,8 +243,8 @@ class RemoteServer:
 
 if __name__ == "__main__":
 
-    # config = OmegaConf.load('./ptgaze/data/configs/edge.yaml')
-    config = OmegaConf.load('./ptgaze/data/configs/edge_xgaze.yaml')
+    config = OmegaConf.load('./ptgaze/data/configs/edge.yaml')
+    # config = OmegaConf.load('./ptgaze/data/configs/edge_xgaze.yaml')
     
     # 설정에 따라 자동으로 모델 다운로드
     if config.mode == 'MPIIGaze':
