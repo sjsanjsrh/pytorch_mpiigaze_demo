@@ -7,10 +7,10 @@ at least one coordinate after feature selection.
 
 Example
 -------
-python analysis/visualize_selected_landmarks.py \
-    --dataset data/mouth_landmark_dataset.npz \
-    --indices artifacts/landmark_selection/mouth_landmarks_selected_indices.npy \
-    --sample-idx 0 \
+python analysis/visualize_selected_landmarks.py `
+    --dataset data/mouth_landmark_dataset.npz `
+    --indices artifacts/landmark_selection/mouth_landmarks_selected_indices.npy `
+    --sample-idx 0 `
     --out artifacts/landmark_selection/selected_landmarks.png
 """
 
