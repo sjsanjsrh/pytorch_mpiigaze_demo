@@ -1,0 +1,80 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}서론}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{배경}{1}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{목표}{1}{section*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{범위와 현재 상태}{1}{section*.4}\protected@file@percent }
+\citation{Kartynnik2019FaceMesh}
+\citation{Bazarevsky2019BlazeFace}
+\citation{Lepetit2009EPnP}
+\@writefile{toc}{\contentsline {section}{\numberline {2}시스템 개요}{2}{section.5}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces 시스템 개요 파이프라인: 랜드마크/머리자세→시선/입 회귀→UDP TX/RX→투영/호모그래피/칼만→커서/명령}}{2}{figure.6}\protected@file@percent }
+\newlabel{fig:pipeline}{{1}{2}{시스템 개요 파이프라인: 랜드마크/머리자세→시선/입 회귀→UDP TX/RX→투영/호모그래피/칼만→커서/명령}{figure.6}{}}
+\@writefile{toc}{\contentsline {paragraph}{구성 및 역할}{2}{section*.8}\protected@file@percent }
+\citation{Krafka2016}
+\citation{Zhang2015Wild}
+\citation{Zhang2020ETHXGaze}
+\citation{Rakhmatulin2020LowCost}
+\citation{Zhang2017MPIIGaze}
+\@writefile{toc}{\contentsline {paragraph}{분할 이유(개발·테스트 용이성)}{3}{section*.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}모델 구조}{3}{section.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}MPIIGaze: Pre-activation ResNet-8 + Head Pose 결합}{3}{subsection.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{참고}{3}{section*.12}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces MPIIGaze 상세: Pre-activation ResNet-8 특징(64) + 정규화 머리자세(2) 결합 → FC(66→2) → 시선 각 회귀}}{3}{figure.13}\protected@file@percent }
+\newlabel{fig:mpiigaze}{{2}{3}{MPIIGaze 상세: Pre-activation ResNet-8 특징(64) + 정규화 머리자세(2) 결합 → FC(66→2) → 시선 각 회귀}{figure.13}{}}
+\@writefile{toc}{\contentsline {paragraph}{파라미터 수}{4}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Mouth Regressor: 초소형 Two-head MLP}{4}{subsection.16}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces 입 회귀 모듈: 선택·정규화된 랜드마크를 표준화 후, 얕은 MLP(hidden=4)와 두 헤드(\textit  {openness}, \textit  {lip position})로 회귀}}{4}{figure.17}\protected@file@percent }
+\newlabel{fig:mouth}{{3}{4}{입 회귀 모듈: 선택·정규화된 랜드마크를 표준화 후, 얕은 MLP(hidden=4)와 두 헤드(\textit {openness}, \textit {lip position})로 회귀}{figure.17}{}}
+\@writefile{toc}{\contentsline {paragraph}{파라미터 수}{4}{section*.19}\protected@file@percent }
+\citation{Tibshirani1996Lasso}
+\citation{Friedman2010GLMNet}
+\citation{HartleyZisserman2004}
+\@writefile{toc}{\contentsline {paragraph}{수식 정식화}{5}{section*.21}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces 입 회귀 Select-up(특징 선택) 파이프라인: 표준화 → 스파스 선형 학습($L_1$) → 중요도 산출 → 상위 $k$ 좌표 선택 → 축소 입력 생성.}}{5}{figure.26}\protected@file@percent }
+\newlabel{fig:mouth_select_up}{{4}{5}{입 회귀 Select-up(특징 선택) 파이프라인: 표준화 → 스파스 선형 학습($L_1$) → 중요도 산출 → 상위 $k$ 좌표 선택 → 축소 입력 생성}{figure.26}{}}
+\citation{Tukey1977EDA}
+\citation{HartleyZisserman2004}
+\@writefile{toc}{\contentsline {section}{\numberline {4}사용자 캘리브레이션과 좌표 매핑}{6}{section.29}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}시선 3D→2D 투영 벡터}{6}{subsection.30}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}이상치 제거(IQR)와 대표점}{6}{subsection.32}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}투시변환}{6}{subsection.40}\protected@file@percent }
+\citation{Kalman1960}
+\citation{WelchBishop2006}
+\@writefile{toc}{\contentsline {section}{\numberline {5}칼만 필터 기반 안정화}{7}{section.42}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}상태/측정 모델}{7}{subsection.43}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}예측/보정}{7}{subsection.46}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}엣지 배포 적합성}{7}{section.51}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}성능 고찰}{7}{section.52}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}자원 프로파일}{7}{subsection.53}\protected@file@percent }
+\bibcite{Zhang2017MPIIGaze}{1}
+\bibcite{Krafka2016}{2}
+\bibcite{Zhang2015Wild}{3}
+\bibcite{Zhang2020ETHXGaze}{4}
+\bibcite{Rakhmatulin2020LowCost}{5}
+\bibcite{Bazarevsky2019BlazeFace}{6}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}캘리브레이션 절차}{8}{subsection.54}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}노이즈/안정화 튜닝}{8}{subsection.55}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}결론}{8}{section.56}\protected@file@percent }
+\bibcite{Kartynnik2019FaceMesh}{7}
+\bibcite{Lepetit2009EPnP}{8}
+\bibcite{HartleyZisserman2004}{9}
+\bibcite{Tukey1977EDA}{10}
+\bibcite{Tibshirani1996Lasso}{11}
+\bibcite{Friedman2010GLMNet}{12}
+\bibcite{Kalman1960}{13}
+\bibcite{WelchBishop2006}{14}
+\gdef \@abspage@last{9}

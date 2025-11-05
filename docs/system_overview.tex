@@ -1,0 +1,464 @@
+% !TEX TS-program = pdflatex
+\documentclass[10pt,a4paper]{article}
+\usepackage[hangul]{kotex}
+\usepackage[T1]{fontenc} % Improve Latin glyph coverage alongside Korean
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\usepackage[hypertexnames=false]{hyperref} % Avoid duplicate destination warnings for figures
+\usepackage[all]{hypcap} % Correct hyperref anchors for floats (figure/table)
+\usepackage{graphicx}
+\usepackage{float} % for [H] specifier
+\usepackage{placeins} % for \FloatBarrier
+\usepackage{booktabs}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc}
+\geometry{margin=25mm}
+
+\title{Gaze estimation at lowest edge devices: \\ 시스템 구조와 경량화 설계}
+\author{대림대학교 박제형 김영우 김영범 이민혁}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\textbf{웹캠 기반 시선/입모양 인터페이스}의 핵심 알고리즘을 간결히 정리한다. 경량 시선 추정(MPIIGaze, $\sim7.7\times10^4$ params), 초소형 입 회귀($<10^3$ params), 4점 투시변환 기반 좌표 매핑, 2D 칼만 필터 안정화를 결합해 \textbf{단일 칩(MCU)} 엣지 환경에서도 실시간·저전력 동작을 달성한다.
+\end{abstract}
+
+\section{서론}
+\paragraph{배경} 기존 상용 시선 추적 시스템은 \emph{높은 도입 비용}과 \emph{과도한 전력 소모}라는 분명한 장벽이 존재한다. 또한 클라우드 기반 처리는 네트워크 왕복 지연으로 \emph{반응성}이 떨어지고, 개인 생체 정보를 외부로 전송해야 하는 \emph{프라이버시} 우려를 야기하여 일상적인 기기 적용에 제약이 크다.
+
+\paragraph{목표} 본 연구의 목표는 다음과 같다.
+\begin{itemize}
+  \item \textbf{저전력·저비용:} 고가의 외부 장치 없이, 상용 \textbf{웹캠}과 \textbf{단일 칩(MCU)}만으로 시선 인터페이스 구현
+  \item \textbf{저전력 MCU급 엣지 AI:} 라즈베리파이·퀄컴 등 \emph{고성능 AP}에 의존하지 않고, \textbf{MCU급 프로세서와 경량 NPU/AI 가속기}에서 동작 가능한 \textbf{온디바이스(On-Device)} 추론 설계(예: STM32N6-class)
+  \item \textbf{즉각적 반응성·프라이버시:} 네트워크 지연 요인을 원천 제거하고, 사용자 데이터를 디바이스 외부로 전송하지 않음
+  \item \textbf{최종 목표:} 고성능 시선 인터페이스의 \textbf{대중화}를 앞당기고, \textbf{보조공학·스마트홈} 등 다양한 분야에서 사용 편의성을 극대화
+\end{itemize}
+
+\paragraph{범위와 현재 상태} 본 문서는 \textbf{MCU급 타깃을 고려한 개념 설계}를 제시한다. 아직 MCU 내 실장용 \emph{모델 최적화}(양자화, 가지치기, 커널 융합 등)와 \emph{저전력 처리 파이프라인}(입\,\/\,출력 파이프라이닝, RTOS 스케줄링, 메모리 풋프린트 관리 등)은 구현 전 단계이며, 향후 작업으로 남겨둔다.
+
+Face Mesh(468점, $\sim$3.5M params)는 정확도와 강인성이 뛰어나지만, \textbf{MCU급} 타깃에는 여전히 무겁다. 따라서 BlazeFace(검출) + \emph{소형 랜드마크 회귀 헤드}(예: 눈/입/코 등 필수 소수 점 또는 68점 계열, $\lesssim$\,300k params)로 대체가 필요하다.
+
+이 목표를 달성하기 위해, 본 문서는 경량 시선 추정과 초소형 입 회귀, 투시변환 기반 좌표 매핑, 2D 칼만 필터를 조합한 \textbf{엣지 온디바이스} 파이프라인을 제시한다.
+
+\section{시스템 개요}
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[node distance=5mm and 6mm, font=\small]
+    % Nodes (vertical core)
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=38mm, minimum height=8mm]
+      (camera) {Camera\\640×480};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=46mm, minimum height=10mm, below=of camera]
+      (mp) {MediaPipe Face Mesh\\($\sim$3.5M params)};
+
+    % Split
+    \node[circle, draw, minimum size=4mm, inner sep=0pt, below=6mm of mp] (split) {};
+
+    % Left branch (Gaze)
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=40mm, minimum height=8mm, below left=of split]
+      (headpose) {Head Pose Estimation\\EPnP};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=42mm, minimum height=8mm, below=of headpose]
+      (eye) {Eye Image Normalization\\36×60 both eyes};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=38mm, minimum height=8mm, below=of eye]
+      (mpiigaze) {MPIIGaze\\ResNet-8 (77K)};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=34mm, minimum height=7mm, below=of mpiigaze]
+      (gazeout) {Gaze Output\\pitch \& yaw};
+
+    % Right branch (Mouth)
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=38mm, minimum height=8mm, below right=of split]
+      (lip) {Lip Landmarks\\64 points};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=40mm, minimum height=9mm, below=of lip]
+      (mouthreg) {MouthRegressor\\MLP ($\sim$278 params)};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=38mm, minimum height=7mm, below=of mouthreg]
+      (mouthout) {Mouth Output\\openness / position};
+
+    % Combine anchor at horizontal midpoint of two branches
+    \coordinate (mid) at ($ (gazeout)!0.5!(mouthout) $);
+    % Combine and server/client chain
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=46mm, minimum height=9mm, below=21mm of mid]
+      (combine) {Combine Outputs\\8 × float32};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=46mm, minimum height=8mm, below=of combine]
+      (udptx) {UDP TX};
+  % Server grouping box before placing client column
+  \node[draw, dashed, rounded corners, fit=(camera) (mp) (split) (headpose) (eye) (mpiigaze) (gazeout) (lip) (mouthreg) (mouthout) (combine) (udptx), inner sep=6pt, label=above:{\footnotesize Server}] (serverbox) {};
+
+  % Client column to the right
+    % Align client column top (UDP RX) to server top (Camera), and place to the right of entire server box
+    \coordinate (clientX) at ($(serverbox.east)+(30mm,0)$);
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=46mm, minimum height=8mm]
+      (udprx) at ($(clientX |- camera)$) {Client: UDP RX};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=46mm, minimum height=8mm, below=of udprx]
+      (proj2d) {Gaze 3D → 2D projection};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=46mm, minimum height=8mm, below=of proj2d]
+      (applyH) {Apply Homography $H$};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=46mm, minimum height=8mm, below=of applyH]
+      (kalman) {Kalman Filter (2D)};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=36mm, minimum height=7mm, below=of kalman]
+      (final) {Cursor / Commands};
+
+    % Arrows
+    \draw[-{Latex[length=2.5mm]}] (camera) -- (mp);
+    \draw[-{Latex[length=2.5mm]}] (mp) -- (split);
+
+    \draw[-{Latex[length=2.5mm]}] (split) -- (headpose);
+    \draw[-{Latex[length=2.5mm]}] (headpose) -- (eye);
+    \draw[-{Latex[length=2.5mm]}] (eye) -- (mpiigaze);
+    \draw[-{Latex[length=2.5mm]}] (mpiigaze) -- (gazeout);
+    \draw[-{Latex[length=2.5mm]}] (split) -- (lip);
+    \draw[-{Latex[length=2.5mm]}] (lip) -- (mouthreg);
+    \draw[-{Latex[length=2.5mm]}] (mouthreg) -- (mouthout);
+    \draw[-{Latex[length=2.5mm]}] (gazeout.south) |- (combine.west);
+    \draw[-{Latex[length=2.5mm]}] (mouthout.south) |- (combine.east);
+    \draw[-{Latex[length=2.5mm]}] (combine) -- (udptx);
+
+    \draw[-{Latex[length=2.5mm]}]
+      (udptx.east) -| ($(udptx.east)+(28mm,0)$) |- (udprx.west);
+    \draw[-{Latex[length=2.5mm]}] (udprx) -- (proj2d);
+    \draw[-{Latex[length=2.5mm]}] (proj2d) -- (applyH);
+    \draw[-{Latex[length=2.5mm]}] (applyH) -- (kalman);
+    \draw[-{Latex[length=2.5mm]}] (kalman) -- (final);
+
+    % Client grouping box and label
+    \node[draw, dashed, rounded corners, fit=(udprx) (proj2d) (applyH) (kalman) (final), inner sep=6pt, label=above:{\footnotesize Client}] (clientbox) {};
+  \end{tikzpicture}
+  \caption{시스템 개요 파이프라인: 랜드마크/머리자세→시선/입 회귀→UDP TX/RX→투영/호모그래피/칼만→커서/명령}
+  \label{fig:pipeline}
+\end{figure}
+
+\paragraph{구성 및 역할} 시스템은 \textbf{서버(송신/추론)}와 \textbf{클라이언트(수신/보정/제어)}로 나뉜다. 서버는 카메라 프레임에서 얼굴 랜드마크와 머리자세를 추정해 시선 및 입 모양 지표를 계산하고, 이를 \emph{UDP}로 지속 송신한다. 클라이언트는 수신값을 사용자 캘리브레이션(투시변환)과 칼만 필터로 보정해 화면 좌표/명령으로 변환한다.
+ 얼굴 랜드마크는 MediaPipe Face Mesh(\cite{Kartynnik2019FaceMesh,Bazarevsky2019BlazeFace})를 사용한다.
+
+\begin{itemize}
+  \item \textbf{서버(UDP 송신)}: 프레임 캡처 및 왜곡 보정 \,$\to$\, 랜드마크/머리자세(EPnP \cite{Lepetit2009EPnP}) \,$\to$\, 정규화 \,$\to$\, 시선 추정(모드: MPIIGaze/\-MPIIFaceGaze/\-ETH-XGaze) \,$\to$\, 입 회귀 \,$\to$\, 패킷화 및 전송. 신규 클라이언트의 바인딩 요청을 수락해 리스트에 등록하고 동일 페이로드를 브로드캐스트 형태로 송신한다.
+  \item \textbf{클라이언트(보정/제어)}: 패킷 수신 \,$\to$\, 시선 2D 투영 \,$\to$\, 호모그래피 $H$ 적용(화면 좌표화) \,$\to$\, 2D 칼만 보정(지터 억제) \,$\to$\, 커서 위치/명령 출력. 입벌림/입술위치를 이용해 클릭·스크롤 등 모달 명령을 생성한다.
+\end{itemize}
+
+전체 파이프라인은 그림~\ref{fig:pipeline}와 같이 \textbf{서버(좌)}와 \textbf{클라이언트(우)}로 구분되며, UDP TX/RX를 통해 연동된다.
+
+\paragraph{분할 이유(개발·테스트 용이성)} 서버/클라이언트 분리는 \textbf{빠른 반복 개발}과 \textbf{재현 가능한 테스트}를 위해 의도적으로 도입하였다. 예를 들어, \emph{추론부만} 엣지(MCU/NPU)로 이전하고 전처리·보정·UI는 호스트에서 유지하는 \textbf{하이브리드 구성}을 손쉽게 실험할 수 있다.
+
+\section{모델 구조}
+\subsection{MPIIGaze: Pre-activation ResNet-8 + Head Pose 결합}
+모델은 얕은 ResNet(깊이 8, 기본 채널 16)과 2차원 정규화 머리자세를 결합하여 2D 시선 각(피치/요)을 회귀한다. 입력은 단안 눈 패치(1$\times$36$\times$60), 우안의 경우 수평 반전 및 자세 부호 보정을 수행한다.
+
+관련 선행 연구로는 모바일/웹캠 환경의 appearance-based 시선 추정을 다룬 \cite{Krafka2016,Zhang2015Wild,Zhang2020ETHXGaze,Rakhmatulin2020LowCost} 등이 있다.
+\paragraph{참고} 본 MPIIGaze 설계와 구현은 Zhang et al.~\cite{Zhang2017MPIIGaze}의 방법과 공개 자료를 전반적으로 참고한다.
+
+모델의 블록도는 그림~\ref{fig:mpiigaze}에 제시하였다.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[node distance=7mm and 12mm, font=\small]
+    % Input
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=44mm, minimum height=8mm]
+      (in) {Eye Patch\\$1\times36\times60$};
+    % Backbone
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=52mm, minimum height=8mm, below=of in]
+      (conv) {Conv $3\times3$, C=16};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=52mm, minimum height=8mm, below=of conv]
+      (s1) {Stage1: PreAct ResBlock $\times1$\\C=16};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=52mm, minimum height=8mm, below=of s1]
+      (s2) {Stage2: PreAct ResBlock $\times1$\\C=32, stride=2};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=52mm, minimum height=8mm, below=of s2]
+      (s3) {Stage3: PreAct ResBlock $\times1$\\C=64, stride=2};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=46mm, minimum height=8mm, below=of s3]
+      (gap) {Global Avg Pool\\feature: 64};
+
+    % Head pose side input
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=35mm, minimum height=8mm, right=18mm of gap]
+      (hp) {Head Pose (normalized)\\2-D};
+
+    % Concat and FC
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=44mm, minimum height=8mm, below=10mm of gap]
+      (concat) {Concat [64] + [2] $\to$ 66};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=44mm, minimum height=8mm, below=of concat]
+      (fc) {FC $66\to2$};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=44mm, minimum height=8mm, below=of fc]
+      (out) {Angles (pitch \& yaw)};
+
+    % Arrows
+    \draw[-{Latex[length=2.5mm]}] (in) -- (conv);
+    \draw[-{Latex[length=2.5mm]}] (conv) -- (s1);
+    \draw[-{Latex[length=2.5mm]}] (s1) -- (s2);
+    \draw[-{Latex[length=2.5mm]}] (s2) -- (s3);
+    \draw[-{Latex[length=2.5mm]}] (s3) -- (gap);
+    \draw[-{Latex[length=2.5mm]}] (gap) -- (concat);
+    \draw[-{Latex[length=2.5mm]}] (hp.west) -| ++(-5mm,0) |- (concat.east);
+    \draw[-{Latex[length=2.5mm]}] (concat) -- (fc);
+    \draw[-{Latex[length=2.5mm]}] (fc) -- (out);
+
+    % Fit box and annotation
+    \node[draw, rounded corners, fit=(conv) (s3) (gap), inner sep=6pt, label=left:{\footnotesize PreAct ResNet-8} ] (backbonebox) {};
+  \end{tikzpicture}
+  \caption{MPIIGaze 상세: Pre-activation ResNet-8 특징(64) + 정규화 머리자세(2) 결합 → FC(66→2) → 시선 각 회귀}
+  \label{fig:mpiigaze}
+\end{figure}
+
+\paragraph{파라미터 수} 각 합성곱은 \texttt{bias=False}, 배치정규화는 scale/bias만 학습하며, GAP 이후 FC 입력 차원은 64+2=66이다. 대략적 파라미터 총량은
+\[
+\underbrace{\sim 7.7\times10^4}_{\text{Conv/BN 전체}}\; +\; \underbrace{132}_{\text{FC 가중치}}\; +\; \underbrace{2}_{\text{FC bias}}\;\approx\; \mathbf{7.7\times10^4}.
+\]
+즉, \textbf{약 77k} 수준으로 매우 작다(엣지 배포에 유리).
+
+\subsection{Mouth Regressor: 초소형 Two-head MLP}
+입 특징은 기하적 상관이 강하고 저차원 관계가 지배적이므로 폭 4의 얕은 MLP와 두 개의 1D 헤드로 충분하다. 전처리 표준화로 학습을 단순화하고, Select-up으로 입력 차원을 상위 $k$로 축소해 추론 경로는 선형→활성→선형 두 단계만 거치므로 MCU/NPU에서 지연과 전력 소모를 크게 줄인다.
+
+모듈 개요는 그림~\ref{fig:mouth}에 도시하였다.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[node distance=7mm and 12mm, font=\small]
+    % Input and preprocessing
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=45mm, minimum height=8mm]
+      (land) {Selected Mouth Landmarks\\$k\times2$ (normalized)};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=45mm, minimum height=8mm, below=of land]
+      (stdz) {Flatten \& Standardize\\(mean/std)};
+
+    % Backbone MLP
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=38mm, minimum height=8mm, below=of stdz]
+      (hid) {Hidden (ReLU)\\width=4};
+
+    % Heads
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=38mm, minimum height=8mm, below left=10mm and 18mm of hid]
+      (open) {Openness\\sigmoid $\in[0,1]$};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=38mm, minimum height=8mm, below right=10mm and 18mm of hid]
+      (lippos) {Lip Position\\tanh $\in[-1,1]$};
+
+    % Arrows
+    \draw[-{Latex[length=2.5mm]}] (land) -- (stdz);
+    \draw[-{Latex[length=2.5mm]}] (stdz) -- (hid);
+    \draw[-{Latex[length=2.5mm]}] (hid.south) |- ++(-10mm,-5mm) -| (open.north);
+    \draw[-{Latex[length=2.5mm]}] (hid.south) |- ++(10mm,-5mm) -| (lippos.north);
+
+    % Fit and params note
+    \node[draw, rounded corners, fit=(hid), inner sep=6pt, label=left:{\footnotesize Two-head MLP}] (mlpbox) {};
+  \node[align=center, anchor=north, font=\footnotesize, below=6mm of lippos.center] (paramsnote) {\textbf{Params} $<1\text{k}$ (e.g., $\sim8\times10^2$ @ $k\approx200$)};
+  \end{tikzpicture}
+  \caption{입 회귀 모듈: 선택·정규화된 랜드마크를 표준화 후, 얕은 MLP(hidden=4)와 두 헤드(\textit{openness}, \textit{lip position})로 회귀}
+  \label{fig:mouth}
+\end{figure}
+
+\texttt{MouthRegressor}는 하나의 얕은 은닉층(예: hidden=4) 뒤에 \textit{openness}(sigmoid), \textit{lip position}(tanh) 두 개의 1차원 헤드를 둔다. 입력은 정규화 랜드마크를 평탄화하고, 전처리에서 스케일링(\texttt{mean/std})을 적용한다.
+
+\paragraph{파라미터 수} 입력 차원을 $n$이라 할 때, 파라미터는 대략 $4n + 14$개(은닉 4의 가중치+바이어스, 두 헤드의 가중치+바이어스 포함). 예컨대, 특징 200개 내외($n\approx 200$)면 \textbf{$\sim$\,\,8\,$\times10^2$}로 1천 미만이다.
+
+\subsubsection*{Select-up(특징 선택): L1 스파스 로지스틱 기반}
+입 회귀의 입력 차원을 최소화하기 위해, 라벨 분류용 선형 모델(다항 로지스틱 회귀)에 \textbf{$L_1$ 패널티}를 주어 가중치를 희소화하고, \emph{가중치 절대값 평균}으로 중요도를 산출해 상위 $k$개의 랜드마크 좌표를 선택한다. 전처리/선택 파이프라인은 아래와 같다.
+
+\paragraph{수식 정식화} 데이터 $\mathcal{D}=\{(x_i,y_i)\}_{i=1}^N$에서 입력 $x_i\in\mathbb{R}^n$, 클래스 $y_i\in\{1,\dots,C\}$에 대해, 클래스별 로짓 $z_c= w_c^T x + b_c$와 소프트맥스 확률
+\begin{equation}
+  p(y=c\mid x;W,b) = \frac{\exp(w_c^T x + b_c)}{\sum_{k=1}^C \exp(w_k^T x + b_k)}
+\end{equation}
+을 정의한다. 이는 LASSO 유형의 $L_1$ 정규화 분류 설정으로 좌표강하 기반의 해법이 널리 쓰인다(\cite{Tibshirani1996Lasso,Friedman2010GLMNet}). 다항 로지스틱의 평균 음의 로그우도(교차엔트로피)와 $L_1$ 정규화 항을 합한 목적함수는
+\begin{align}
+  \mathcal{J}(W,b) &= \frac{1}{N}\sum_{i=1}^N \Big[-\log p\big(y_i\mid x_i;W,b\big)\Big] + \lambda\,\lVert W\rVert_1,\\
+  \lVert W\rVert_1 &= \sum_{c=1}^C\sum_{j=1}^n \big|W_{c j}\big|.
+\end{align}
+$L_1$ 패널티는 계수의 희소성을 유도하여 불필요한 특징을 억제한다. 학습된 가중치로부터 특징 중요도는
+\begin{equation}
+  s_j = \frac{1}{C}\sum_{c=1}^C \big|W_{c j}\big|,\quad j=1,\dots,n
+\end{equation}
+과 같이 정의하고, $s_j$ 상위 $k$개의 인덱스를 선택한다.
+
+선택 파이프라인의 흐름은 그림~\ref{fig:mouth_select_up}에 나타냈다.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[node distance=8mm and 10mm, font=\small]
+    % Nodes (vertical layout)
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=44mm, minimum height=8mm]
+      (data) {데이터셋\newline (ratios, centers, landmarks)};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=44mm, minimum height=8mm, below=of data]
+      (std) {표준화\newline (mean/std)};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=44mm, minimum height=8mm, below=of std]
+      (sparse) {스파스 선형\newline (다항 로지스틱 + $L_1$)};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=44mm, minimum height=8mm, below=of sparse]
+      (rank) {특징 중요도\newline (|W| 평균)};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=44mm, minimum height=8mm, below=of rank]
+      (select) {상위 $k$ 선택\newline (indices)};
+    \node[draw, rounded corners, align=center, inner sep=4pt, minimum width=44mm, minimum height=8mm, below=of select]
+      (reduced) {축소 입력\newline (선택 좌표만)};
+
+    % Arrows
+    \draw[-{Latex[length=2.5mm]}] (data) -- (std);
+    \draw[-{Latex[length=2.5mm]}] (std) -- (sparse);
+    \draw[-{Latex[length=2.5mm]}] (sparse) -- (rank);
+    \draw[-{Latex[length=2.5mm]}] (rank) -- (select);
+    \draw[-{Latex[length=2.5mm]}] (select) -- (reduced);
+
+    % Fit around select-up
+    \node[draw, rounded corners, fit=(std) (reduced), inner sep=6pt, label=right:{\footnotesize Select-up 파이프라인}] (fitbox) {};
+  \end{tikzpicture}
+  \caption{입 회귀 Select-up(특징 선택) 파이프라인: 표준화 → 스파스 선형 학습($L_1$) → 중요도 산출 → 상위 $k$ 좌표 선택 → 축소 입력 생성.}
+  \label{fig:mouth_select_up}
+\end{figure}
+
+\subsubsection*{학습 데이터 및 성능}
+교내 환경에서 \textbf{학생 13명(임의 선택)}을 대상으로 소규모 데이터셋을 수집하여 \texttt{MouthRegressor}를 학습하였다. Select-up으로 상위 $k$ 특징만 사용하고 표준화를 적용했을 때, 총 파라미터 수가 $<10^3$인 얕은 MLP가 
+\emph{입벌림(openness)}과 \emph{입술 위치(lip position)}에 대해 \textbf{소량 수집한 데이터로도 안정적으로 동작}함을 관찰하였다. 
+클래스별 전체 합계: \textit{mouth\_closed} 1707, \textit{mouth\_open} 1557, \textit{lip\_raise} 1231, \textit{lip\_lower} 1627.
+
+\section{사용자 캘리브레이션과 좌표 매핑}
+\subsection{시선 3D→2D 투영 벡터}
+핀홀 모델 기반의 단순 투영은 스크린 평면 상 단조 매핑을 제공해 이후 호모그래피 보정과 잘 결합된다. 3D 레이-플레인 교차를 명시적으로 계산하는 것과 동치이면서도 연산이 매우 가볍고, 정규화된 머리자세·눈 패치 가정하에 잡음에 덜 민감하다(\cite{HartleyZisserman2004}).
+
+양안의 정규화 시선 벡터 $v_i=(x_i,y_i,z_i)$를 합해 $r=\sum_i v_i$라 하고, 2D 투영 벡터 $p\in\mathbb{R}^2$는
+\begin{equation}
+  p = \begin{bmatrix} r_x/(-r_z) \\ r_y/(-r_z) \end{bmatrix},\quad (r_z\neq 0).
+\end{equation}
+우안의 수평 성분은 데이터 정합을 위해 부호 반전한다.
+
+
+\subsection{이상치 제거(IQR)와 대표점}
+각 화면 타겟(네 모서리)을 일정 시간 응시하며 $\{p_t\}_{t=1}^N$ (각 $p_t\in\mathbb{R}^2$)를 수집한 뒤, \textbf{중심점과의 거리 분포}에서 IQR 기반 문턱으로 이상치를 제거하고, 남은 샘플의 평균을 대표점으로 정의한다(\cite{Tukey1977EDA}).
+
+한 타겟에 대해 먼저 임시 중심을
+\begin{equation}
+  \bar{p} = \frac{1}{N}\sum_{t=1}^N p_t \in \mathbb{R}^2
+\end{equation}
+로 두고, 각 샘플의 중심까지의 유클리드 거리를
+\begin{equation}
+  d_t = \lVert p_t - \bar{p} \rVert_2,\quad t=1,\dots,N
+\end{equation}
+로 정의한다. 거리 집합 $\{d_t\}$의 제1사분위수와 제3사분위수를 각각
+\begin{equation}
+  Q_1 = \operatorname{quantile}_{0.25}\big(\{d_t\}\big),\quad
+  Q_3 = \operatorname{quantile}_{0.75}\big(\{d_t\}\big)
+\end{equation}
+로 두면, 사분위 범위(IQR)와 상/하한 펜스는
+\begin{align}
+  \mathrm{IQR} &= Q_3 - Q_1,\\
+  F_L &= \max\big(0,\, Q_1 - 1.5\,\mathrm{IQR}\big),\quad
+  F_U = Q_3 + 1.5\,\mathrm{IQR}
+\end{align}
+으로 준다. (거리 $d_t\ge 0$이므로 실무에선 상한 $F_U$만으로도 충분하다.)
+이때 inlier 집합과 대표점은
+\begin{align}
+  \mathcal{I} &= \big\{ t\in\{1,\dots,N\}\;:\; F_L \le d_t \le F_U \big\},\\
+  \hat{p} &= \frac{1}{|\mathcal{I}|}\sum_{t\in\mathcal{I}} p_t
+\end{align}
+으로 정의한다. 네 모서리 각각에 대해 위 절차를 적용하여 $\{\hat{p}_j\}_{j=1}^4$를 얻고, 이후 호모그래피 추정에 사용한다.
+
+\subsection{투시변환}
+네 점만으로 평면 사상 $H$를 추정하면 학습기나 비선형 최적화를 도입하지 않고도 사용자별·환경별 보정이 가능하다.
+
+시선 평면 상의 대표 4점 $\{\tilde{p}_j\}$과 화면의 대응 4점 $\{p'_j\}$를 이용해, 동차좌표에서
+\begin{equation}
+  \lambda \begin{bmatrix} p'_x \\ p'_y \\ 1 \end{bmatrix} =
+  H\, \begin{bmatrix} \tilde{p}_x \\ \tilde{p}_y \\ 1 \end{bmatrix},\quad H\in\mathbb{R}^{3\times3},\;\lambda\neq 0.
+\end{equation}
+OpenCV의 \texttt{getPerspectiveTransform}으로 $H$를 추정하고, 실시간 벡터 $\tilde{p}$에 \texttt{perspectiveTransform}을 적용하여 화면 좌표 $p'$를 얻는다(\cite{HartleyZisserman2004}).
+
+\section{칼만 필터 기반 안정화}
+\subsection{상태/측정 모델}
+2D 위치/속도 상태 벡터 $x=[p_x,\,p_y,\,v_x,\,v_y]^T$와 측정 $z=[p_x,\,p_y]^T$를 사용한다. 시간 간격 $dt$에서
+\begin{align}
+  x_{k|k-1} &= A(dt)\,x_{k-1|k-1}, & A(dt) &= \begin{bmatrix}1&0&dt&0\\0&1&0&dt\\0&0&1&0\\0&0&0&1\end{bmatrix},\\
+  z_k &= H\,x_{k|k-1} + \text{noise}, & H &= \begin{bmatrix}1&0&0&0\\0&1&0&0\end{bmatrix}.
+\end{align}
+프로세스 잡음 $Q$와 측정 잡음 $R$은 대각 공분산으로 두며, $R$은 캘리브레이션 수집치의 분산으로 추정(스케일 조절)한다.
+
+\subsection{예측/보정}
+상수 속도(2D) 상태공간 모델은 파라미터가 적고 튜닝이 단순하며, 가변 $dt$를 행렬 $A(dt)$에 반영해 프레임 변동에도 안정적이다. 공분산 $Q,R$을 대각으로 두어 연산량을 최소화하고, 역행렬도 2×2로 닫힌형이라 임베디드에서 계산 부담이 작다.
+
+표준 칼만 필터 갱신을 따른다(\cite{Kalman1960,WelchBishop2006}):
+\begin{align}
+  &\textbf{Predict:} && x_{k|k-1}=A x_{k-1|k-1},\; P_{k|k-1}=A P_{k-1|k-1}A^T+Q, \\
+  &\textbf{Update:}  && y_k = z_k - H x_{k|k-1},\; S_k = H P_{k|k-1}H^T + R,\\
+  &&& K_k = P_{k|k-1}H^T S_k^{-1},\\
+  &&& x_{k|k} = x_{k|k-1} + K_k y_k,\; P_{k|k} = (I-K_k H)P_{k|k-1}.
+\end{align}
+여기서 $y_k$는 잔차이다. 본 시스템에서는 \texttt{correct(z, dt)} 인터페이스로 예측과 보정을 한 번에 수행한다.
+
+
+\section{엣지 배포 적합성}
+\begin{itemize}
+  \item \textbf{모델 크기:} MPIIGaze $\approx 7.7\times10^4$ 파라미터, Mouth Regressor $<10^3$ 수준(은닉 4, 특징 $\sim$200 가정). 온디바이스 메모리/연산 부담이 작다.
+  \item \textbf{양자화 친화:} 얕은 합성곱/선형 구조로 정적 양자화(INT8) 및 임베디드 변환(ONNX\,$\to$\,벤더 툴체인)에 유리.
+  \item \textbf{전처리 대체 용이:} 랜드마크/머리자세 모듈은 타 경량 추정기로 교체 가능(플러그형).
+  \item \textbf{랜드마크 경량화 전략:} Face Mesh는 정확하지만 무거우므로, (i) ROI+저해상도+프레임 스킵+트래킹, (ii) INT8 양자화, (iii) BlazeFace+소형 랜드마크 헤드(필수 점만), (iv) 68점 또는 그 이하 핵심점 전용 경량 모델 등으로 대체/축소 가능.
+\end{itemize}
+
+\section{성능 고찰}
+
+\subsection{자원 프로파일}
+\begin{itemize}
+  \item \textbf{연산 경량성:} 시선 네트워크 $\sim7.7\times10^4$ 파라미터(\,\,$\approx$\,0.31\,MB@FP32, 0.08\,MB@INT8), 입 회귀 $<10^3$ 파라미터(\,\,$<4$\,KB@FP32).
+  \item \textbf{양자화 이점:} INT8 변환 시 메모리/대역폭 절감, 캐시 적중률 향상으로 지연 감소 기대.
+  \item \textbf{지연 분석:} 랜드마크/정규화 \,$+$\, 추론 \,$+$\, 투시/칼만 \,$+$\, I/O(캡처/표시). 추론/전처리가 우세하며 나머지는 경미.
+\end{itemize}
+
+\subsection{캘리브레이션 절차}
+\begin{itemize}
+  \item 화면 네 모서리 순차 제시(수 초): 각 지점에서 시선 샘플 수집, IQR로 이상치 제거 후 평균.
+  \item 대표 4점으로 $H$(호모그래피) 추정 \,$\to$\, 실시간 벡터에 적용해 화면 좌표화.
+  \item 환경(카메라 위치, 사용자 자세, 모니터) 변화 시 재캘리브레이션 권장.
+\end{itemize}
+
+\subsection{노이즈/안정화 튜닝}
+\begin{itemize}
+  \item 프로세스 잡음 $Q$ \,$\uparrow$\,: 반응성 증가(빠르게 따라감), 매끄러움 감소. $Q$ \,$\downarrow$\,: 반대.
+  \item 측정 잡음 $R$ \,$\uparrow$\,: 측정을 덜 신뢰(평활화 증가). $R$ \,$\downarrow$\,: 반대. 수집 분산으로 $R$ 초기화 가능.
+  \item 프레임 간 간격 $dt$ 변동은 상태전이 $A(dt)$에 반영되어 자연스러운 속도 추정 유지.
+\end{itemize}
+
+\section{결론}
+본 시스템은 얕은 시선 네트워크와 초소형 입 회귀를 조합하고, 4점 투시변환과 칼만 필터로 좌표를 보정해 \emph{저전력 엣지} 환경에서도 실시간 상호작용을 가능하게 한다. 모델 크기가 작고(\,$\sim$\,$10^4$\,\textendash\,$10^3$\,), 구성요소가 모듈화되어 이식/튜닝이 용이하다.
+
+% 참고문헌
+\begin{thebibliography}{99}
+\bibitem{Zhang2017MPIIGaze}
+X. Zhang, Y. Sugano, M. Fritz, and A. Bulling, ``MPIIGaze: Real-World Dataset and Deep Appearance-Based Gaze Estimation,'' \emph{IEEE Transactions on Pattern Analysis and Machine Intelligence}, vol.~41, no.~1, pp.~162--175, 2019.\\
+arXiv: \href{https://arxiv.org/abs/1711.09017}{arXiv:1711.09017}.
+
+\bibitem{Krafka2016}
+K. Krafka, A. Khosla, P. Kellnhofer, H. Kannan, S. Bhandarkar, W. Matusik, and A. Torralba, ``Eye Tracking for Everyone,'' in \emph{Proc. CVPR}, 2016.\\
+arXiv: \href{https://arxiv.org/abs/1606.05814}{arXiv:1606.05814}.
+
+\bibitem{Zhang2015Wild}
+X. Zhang, Y. Sugano, M. Fritz, and A. Bulling, ``Appearance-Based Gaze Estimation in the Wild,'' in \emph{Proc. CVPR}, 2015.
+
+\bibitem{Zhang2020ETHXGaze}
+X. Zhang, M. Sturma, Y. Sugano, and A. Bulling, ``ETH-XGaze: A Large Scale Dataset for Gaze Estimation under Extreme Head Pose and Appearance Variation,'' in \emph{Proc. ECCV}, 2020.\\
+arXiv: \href{https://arxiv.org/abs/2003.09001}{arXiv:2003.09001}.
+
+\bibitem{Rakhmatulin2020LowCost}
+I. Rakhmatulin and A. T. Duchowski, ``Deep Neural Networks for Low-Cost Eye Tracking,'' \emph{Procedia Computer Science}, vol.~176, pp.~685--694, 2020.\\
+DOI: \href{https://doi.org/10.1016/j.procs.2020.09.041}{10.1016/j.procs.2020.09.041}.
+
+\bibitem{Bazarevsky2019BlazeFace}
+V. Bazarevsky, I. Grishchenko, K. Raveendran, G. Ablavatski, and M. Grundmann, ``BlazeFace: Sub-millisecond Neural Face Detection on Mobile GPUs,'' 2019.\\
+arXiv: \href{https://arxiv.org/abs/1907.05047}{arXiv:1907.05047}.
+
+\bibitem{Kartynnik2019FaceMesh}
+I. Kartynnik, A. Ablavatski, I. Grishchenko, and M. Grundmann, ``Real-time Facial Surface Geometry from Monocular Video on Mobile Devices,'' 2019.\\
+arXiv: \href{https://arxiv.org/abs/1907.06724}{arXiv:1907.06724}.
+
+\bibitem{Lepetit2009EPnP}
+V. Lepetit, F. Moreno-Noguer, and P. Fua, ``EPnP: An Accurate O(n) Solution to the PnP Problem,'' \emph{International Journal of Computer Vision}, vol.~81, pp.~155--166, 2009.\\
+DOI: \href{https://doi.org/10.1007/s11263-008-0152-6}{10.1007/s11263-008-0152-6}.
+
+\bibitem{HartleyZisserman2004}
+R. Hartley and A. Zisserman, \emph{Multiple View Geometry in Computer Vision}, 2nd ed., Cambridge University Press, 2004.
+
+\bibitem{Tukey1977EDA}
+J. W. Tukey, \emph{Exploratory Data Analysis}, Addison-Wesley, 1977.
+
+\bibitem{Tibshirani1996Lasso}
+R. Tibshirani, ``Regression Shrinkage and Selection via the Lasso,'' \emph{Journal of the Royal Statistical Society: Series B}, vol.~58, no.~1, pp.~267--288, 1996.
+
+\bibitem{Friedman2010GLMNet}
+J. Friedman, T. Hastie, and R. Tibshirani, ``Regularization Paths for Generalized Linear Models via Coordinate Descent,'' \emph{Journal of Statistical Software}, vol.~33, no.~1, pp.~1--22, 2010.\\
+URL: \href{https://www.jstatsoft.org/article/view/v033i01}{jstatsoft.org/article/view/v033i01}.
+
+\bibitem{Kalman1960}
+R. E. Kalman, ``A New Approach to Linear Filtering and Prediction Problems,'' \emph{Transactions of the ASME--Journal of Basic Engineering}, vol.~82, pp.~35--45, 1960.
+
+\bibitem{WelchBishop2006}
+G. Welch and G. Bishop, ``An Introduction to the Kalman Filter,'' UNC TR 95-041, 2006.\\
+URL: \href{https://www.cs.unc.edu/~welch/media/pdf/kalman_intro.pdf}{kalman\_intro.pdf}.
+\end{thebibliography}
+
+\end{document}
