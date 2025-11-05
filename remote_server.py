@@ -7,6 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from mediapipe.python.solutions.face_mesh_connections import FACEMESH_TESSELATION
 from omegaconf import OmegaConf
 
 import ptgaze.utils as utils
@@ -28,6 +29,10 @@ from ptgaze.utils import (
 HOST, PORT = "0.0.0.0", 25500
 
 DEBUG = True
+WIREFRAME_COLOR = (0, 200, 255)
+WIREFRAME_THICKNESS = 1
+WIREFRAME_ALPHA = 0.45
+MESH_EDGES = np.asarray(list(FACEMESH_TESSELATION), dtype=np.int32)
 
 def _get_ddbox_size(face: Face) -> float:
     """
@@ -111,7 +116,7 @@ class RemoteServer:
         self._bind_thread = threading.Thread(target=self.client_bind_thread, daemon=True)
         self._bind_thread.start()
 
-        self._cap = cv2.VideoCapture(0)
+        self._cap = cv2.VideoCapture(2)
 
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.gaze_estimator.camera.width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.gaze_estimator.camera.height)
@@ -153,43 +158,55 @@ class RemoteServer:
                     frame_count = 0
                     fps_update_time = current_time
                 
-                if face is None:
-                    continue
+                has_face = face is not None
 
-                
                 if DEBUG:
-                    cv2.rectangle(
-                        undistorted, 
-                        tuple(face.bbox[0].astype(int)), 
-                        tuple(face.bbox[1].astype(int)), 
-                        (0, 255, 0), 2)
-                    flip = cv2.flip(undistorted, 1)
+                    debug_frame = undistorted.copy()
+                    if has_face:
+                        self._draw_wireframe(debug_frame, face)
+                        cv2.rectangle(
+                            debug_frame,
+                            tuple(face.bbox[0].astype(int)),
+                            tuple(face.bbox[1].astype(int)),
+                            (0, 255, 0),
+                            2,
+                        )
+                    flip = cv2.flip(debug_frame, 1)
                     cv2.imshow("Remote Server", flip)
                     cv2.waitKey(1)
 
-                # GPU 추론 시작
-                inference_count += 1
-                self.gaze_estimator.estimate_gaze(undistorted, face)
+                gaze_payload = []
 
-                data = []
+                if has_face:
+                    inference_count += 1
+                    self.gaze_estimator.estimate_gaze(undistorted, face)
+
                 if self.config.mode == 'MPIIGaze':
                     # MPIIGaze: 각 눈마다 시선 벡터가 있음
                     for key in self.gaze_estimator.EYE_KEYS:
-                        eye = getattr(face, key.name.lower())
-                        data.extend(eye.normalized_gaze_vector)
+                        vector = np.zeros(3, dtype=np.float32)
+                        if has_face:
+                            eye = getattr(face, key.name.lower())
+                            if eye.normalized_gaze_vector is not None:
+                                vector = np.asarray(eye.normalized_gaze_vector, dtype=np.float32)
+                        gaze_payload.extend(vector.tolist())
                 else:
                     # ETH-XGaze, MPIIFaceGaze: 얼굴 전체의 시선 벡터 사용
-                    data.extend(face.normalized_gaze_vector)
-                    # 양쪽 눈에 같은 값 사용 (호환성을 위해)
-                    data.extend(face.normalized_gaze_vector)
-                
-                mouth_values = self._infer_mouth_outputs(face, undistorted.shape[1], undistorted.shape[0])
-                if mouth_values is None:
-                    mouth_values = (0.0, 0.0)
-                data.extend(mouth_values)
-                data = np.array(data, dtype=np.float32)
+                    vector = np.zeros(3, dtype=np.float32)
+                    if has_face and face.normalized_gaze_vector is not None:
+                        vector = np.asarray(face.normalized_gaze_vector, dtype=np.float32)
+                    gaze_payload.extend(vector.tolist())
+                    gaze_payload.extend(vector.tolist())  # 양쪽 눈 동일 값 유지
 
-                data = data.astype(np.float32).tobytes()
+                if has_face:
+                    mouth_values = self._infer_mouth_outputs(face, undistorted.shape[1], undistorted.shape[0])
+                    if mouth_values is None:
+                        mouth_values = (0.0, 0.0)
+                else:
+                    mouth_values = (0.0, 0.0)
+                gaze_payload.extend(np.asarray(mouth_values, dtype=np.float32).tolist())
+
+                data = np.asarray(gaze_payload, dtype=np.float32).tobytes()
 
                 # 모든 UDP 클라이언트에게 데이터 전송
                 for client_addr in self.udp_clients:
@@ -240,6 +257,32 @@ class RemoteServer:
         except Exception as exc:
             print(f"[WARN] Mouth regression failed: {exc}")
             return None
+
+    def _draw_wireframe(self, image: np.ndarray, face: Face) -> None:
+        if face.landmarks is None or face.landmarks.size == 0:
+            return
+
+        points = face.landmarks
+        if points.shape[1] >= 2:
+            points2d = points[:, :2].astype(np.float32)
+        else:
+            return
+
+        num_points = points2d.shape[0]
+        if num_points == 0:
+            return
+
+        valid_edges = MESH_EDGES[(MESH_EDGES < num_points).all(axis=1)]
+        if valid_edges.size == 0:
+            return
+
+        overlay = image.copy()
+        for idx0, idx1 in valid_edges:
+            p0 = tuple(np.round(points2d[idx0]).astype(int))
+            p1 = tuple(np.round(points2d[idx1]).astype(int))
+            cv2.line(overlay, p0, p1, WIREFRAME_COLOR, WIREFRAME_THICKNESS, cv2.LINE_AA)
+
+        cv2.addWeighted(overlay, WIREFRAME_ALPHA, image, 1 - WIREFRAME_ALPHA, 0, dst=image)
 
 if __name__ == "__main__":
 

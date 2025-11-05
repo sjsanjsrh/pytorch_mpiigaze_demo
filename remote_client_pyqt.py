@@ -1,3 +1,4 @@
+import argparse
 import sys
 import socket
 import numpy as np
@@ -32,8 +33,8 @@ LIP_SCROLL_MAX = 0.9  # 스크롤 정규화 상한
 LIP_VISUAL_RANGE = 1.0  # 시각화 범위(+/-)
 LIP_COMMAND_THRESHOLD = 0.4  # 커서 제어 명령 활성화 기준
 
-MOUTH_JOYSTICK_MIN_INTERVAL = 0.05  # 조이스틱 최대 속도일 때 스크롤 간격(초)
-MOUTH_JOYSTICK_MAX_INTERVAL = 0.2  # 조이스틱 최소 속도일 때 스크롤 간격(초)
+MOUTH_JOYSTICK_MIN_INTERVAL = 0.01  # 조이스틱 최대 속도일 때 스크롤 간격(초)
+MOUTH_JOYSTICK_MAX_INTERVAL = 0.05  # 조이스틱 최소 속도일 때 스크롤 간격(초)
 MOUTH_JOYSTICK_BASE_STRENGTH = 0.35  # 최소 스크롤 강도 배율
 
 MOUTH_COMMAND_IDLE_SPEED = 0.1  # 입 명령 중 기본 커서 이동 속도 배율
@@ -103,8 +104,10 @@ class GazeReceiver(QtCore.QThread):
     def stop(self):
         self.running = False
 class Overlay(QtWidgets.QWidget):
-    def __init__(self, screen_width, screen_height):
+    def __init__(self, screen: QtGui.QScreen):
         super().__init__()
+        geometry = screen.geometry()
+
         self.setWindowFlags(
             QtCore.Qt.FramelessWindowHint |
             QtCore.Qt.WindowStaysOnTopHint |
@@ -112,10 +115,16 @@ class Overlay(QtWidgets.QWidget):
         )
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setWindowFlag(QtCore.Qt.WindowTransparentForInput)
-        self.setGeometry(0, 0, screen_width, screen_height)
+        self.setGeometry(geometry)
 
-        self.screen_width = screen_width
-        self.screen_height = screen_height
+        self.screen = screen
+        self.screen_width = geometry.width()
+        self.screen_height = geometry.height()
+        self.screen_origin_x = geometry.x()
+        self.screen_origin_y = geometry.y()
+
+        screen_width = self.screen_width
+        screen_height = self.screen_height
 
         # 캘리브레이션 점
         self.calibration_points = [
@@ -441,9 +450,11 @@ class Overlay(QtWidgets.QWidget):
                     centerd_point = self.calibration.calc_eye_2d_vector(face)
                     point = self.calibration.calc_filtered_point(centerd_point)
                     self.filtered_gaze = self.calibration.calc_trs_transform(point)
-                    
+
                     x, y = self.filtered_gaze
-                    
+                    global_x = self.screen_origin_x + x
+                    global_y = self.screen_origin_y + y
+
                     mouse_opened = (
                         self.mouth_openness is not None and
                         self.mouth_openness >= MOUTH_CLICK_THRESHOLD
@@ -456,7 +467,13 @@ class Overlay(QtWidgets.QWidget):
                         command_active = True
 
                     if self.mouseHooking:
-                        cursor_pos = self._update_cursor_position(float(x), float(y), now, mouse_opened, command_active)
+                        cursor_pos = self._update_cursor_position(
+                            float(global_x),
+                            float(global_y),
+                            now,
+                            mouse_opened,
+                            command_active,
+                        )
                         # 마우스 클릭
                         if mouse_opened and not self.mouse_pressed:
                             self.mouse_event_leftdown(cursor_pos.x(), cursor_pos.y())
@@ -573,11 +590,35 @@ class Overlay(QtWidgets.QWidget):
             QtWidgets.QApplication.quit()
 
 if __name__ == "__main__":
-    # 화면 해상도 자동 감지
-    app = QtWidgets.QApplication(sys.argv)
-    screen = QtWidgets.QApplication.primaryScreen().geometry()
-    overlay = Overlay(screen.width(), screen.height())
+    parser = argparse.ArgumentParser(description="Remote gaze client overlay")
+    parser.add_argument(
+        "--screen",
+        type=int,
+        default=0,
+        help="Index of the monitor to display the overlay on (0 = primary)",
+    )
+    args, qt_args = parser.parse_known_args()
+
+    app = QtWidgets.QApplication([sys.argv[0]] + qt_args)
+    screens = app.screens()
+    if not screens:
+        print("[ERROR] No displays detected. Exiting.")
+        sys.exit(1)
+
+    screen_index = args.screen
+    if screen_index < 0 or screen_index >= len(screens):
+        print(f"[WARN] Screen index {screen_index} is out of range. Falling back to primary display.")
+        screen_index = 0
+
+    target_screen = screens[screen_index]
+    screen_name = target_screen.name() or f"screen-{screen_index}"
+    print(f"[INFO] Using screen {screen_index}: {screen_name}")
+
+    overlay = Overlay(target_screen)
     overlay.showFullScreen()
+    handle = overlay.windowHandle()
+    if handle is not None:
+        handle.setScreen(target_screen)
 
     # gaze 수신 스레드 시작
     receiver = GazeReceiver(SERVER_IP, SERVER_PORT)
