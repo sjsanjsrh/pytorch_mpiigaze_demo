@@ -12,3 +12,4 @@ torchvision
 pyautogui
 PyQt5
 keyboard
+screeninfo
